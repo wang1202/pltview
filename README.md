@@ -19,7 +19,7 @@ A simple viewer for AMReX plotfiles, inspired by ncview.
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/pltview.git
+git clone https://github.com/wang1202/pltview.git
 cd pltview
 
 # Install in editable mode
@@ -72,6 +72,27 @@ This tool reads AMReX plotfile format (used by ERF, AMReX-Hydro, etc.):
 - `Cell_H`: Cell data header with box layout information
 
 Each Cell_D file contains a FAB (Fortran Array Box) header followed by binary double-precision floating-point data in Fortran (column-major) order.
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.
+
+## Citation
+
+If you use this package in your research, please cite:
+
+```bibtex
+@software{xamrex,
+  author = {Hetland, Robert},
+  title = {xamrex: AMReX Backend for xarray},
+  year = {2025},
+  url = {https://github.com/hetland/xamrex}
+}
+```
 
 ## Example Data
 
