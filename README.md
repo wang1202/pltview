@@ -57,7 +57,7 @@ python -m pltview plt00100
 
 - **Variable Buttons** (left panel, top): Click to select which variable to visualize
 - **Colormap Buttons** (left panel, middle): Select colormap (viridis, turbo, jet, etc.)
-- **Slice Axis** (bottom left): Choose X, Y, or Z axis for slicing  
+- **Slice Axis** (bottom left): Choose X, Y, or Z axis for slicing
 - **Slice Slider** (bottom): Drag to navigate through slices along the chosen axis
 - **Mouse Hover**: Hover over the plot to see coordinates and values
 - **Mouse Click**: Click on any point to open line plots along X, Y, Z directions
@@ -66,6 +66,7 @@ python -m pltview plt00100
 ## File Format
 
 This tool reads AMReX plotfile format (used by ERF, AMReX-Hydro, etc.):
+
 - `Header`: Metadata about variables and grid structure
 - `Level_X/`: Data directories for each AMR level
 - `Cell_D_XXXXX`: FAB binary data files for each MPI domain
@@ -86,19 +87,10 @@ MIT License - see [LICENSE](LICENSE) for details.
 If you use this package in your research, please cite:
 
 ```bibtex
-@software{xamrex,
-  author = {Hetland, Robert},
-  title = {xamrex: AMReX Backend for xarray},
+@software{pltview,
+  author = {Wang, Aaron},
+  title = {pltview: A simple viewer for AMReX plotfiles},
   year = {2025},
-  url = {https://github.com/hetland/xamrex}
+  url = {https://github.com/wang1202/pltview}
 }
 ```
-
-## Example Data
-
-Your plotfile contains 13 variables on a 140×80×100 grid:
-- density, rhoadv_0
-- x_velocity, y_velocity, z_velocity  
-- temp, theta
-- pres_hse, dens_hse, pressure, pert_pres
-- z_phys, mapfac
