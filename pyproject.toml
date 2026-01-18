@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pltview"
+version = "0.1.0"
+description = "A simple viewer for AMReX plotfiles, inspired by ncview"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "wang1202", email = "aaronaktv@gmail.com"}
+]
+keywords = ["amrex", "plotfile", "visualization", "scientific computing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "numpy>=1.20.0",
+    "matplotlib>=3.0.0",
+]
+
+[project.scripts]
+pltview = "pltview:main"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/pltview"
+Repository = "https://github.com/yourusername/pltview"
+
+[tool.setuptools]
+py-modules = ["pltview"]
