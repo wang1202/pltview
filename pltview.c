@@ -1028,13 +1028,19 @@ void jump_button_callback(Widget w, XtPointer client_data, XtPointer call_data) 
         
         XtRealizeWidget(dialog_shell);
         
-        /* Get the text input widget and set focus to it for X11 forwarding */
-        text_widget = XtNameToWidget(dialog, "value");
-        if (text_widget) {
-            XtSetKeyboardFocus(dialog_shell, text_widget);
-        }
+        XtPopup(dialog_shell, XtGrabExclusive);
         
-        XtPopup(dialog_shell, XtGrabNone);
+        /* Get the text input widget and forcefully set focus for X11 forwarding */
+        text_widget = XtNameToWidget(dialog, "value");
+        if (text_widget && XtIsRealized(text_widget)) {
+            Display *dpy = XtDisplay(text_widget);
+            Window win = XtWindow(text_widget);
+            
+            /* Set keyboard focus using both Xt and X11 methods */
+            XtSetKeyboardFocus(dialog_shell, text_widget);
+            XSetInputFocus(dpy, win, RevertToParent, CurrentTime);
+            XSync(dpy, False);
+        }
     }
 }
 
