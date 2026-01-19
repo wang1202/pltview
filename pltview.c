@@ -744,7 +744,7 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
     n = 0;
     XtSetArg(args[n], XtNstring, "1"); n++;
     XtSetArg(args[n], XtNeditType, XawtextEdit); n++;
-    XtSetArg(args[n], XtNwidth, 80); n++;
+    XtSetArg(args[n], XtNwidth, 60); n++;
     XtSetArg(args[n], XtNheight, 25); n++;
     layer_input = XtCreateManagedWidget("layerInput", asciiTextWidgetClass, nav_box, args, n);
     
@@ -754,7 +754,7 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
     if (pf->n_levels > 1) {
         n = 0;
         XtSetArg(args[n], XtNfromVert, canvas_widget); n++;
-        XtSetArg(args[n], XtNfromHoriz, axis_box); n++;
+        XtSetArg(args[n], XtNfromHoriz, nav_box); n++;
         XtSetArg(args[n], XtNborderWidth, 1); n++;
         XtSetArg(args[n], XtNorientation, XtorientHorizontal); n++;
         XtSetArg(args[n], XtNbottom, XawChainBottom); n++;
@@ -776,10 +776,10 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
     n = 0;
     if (pf->n_levels > 1) {
         XtSetArg(args[n], XtNfromVert, level_box); n++;
-        XtSetArg(args[n], XtNfromHoriz, axis_box); n++;
+        XtSetArg(args[n], XtNfromHoriz, nav_box); n++;
     } else {
         XtSetArg(args[n], XtNfromVert, canvas_widget); n++;
-        XtSetArg(args[n], XtNfromHoriz, axis_box); n++;
+        XtSetArg(args[n], XtNfromHoriz, nav_box); n++;
     }
     XtSetArg(args[n], XtNborderWidth, 1); n++;
     XtSetArg(args[n], XtNorientation, XtorientHorizontal); n++;
