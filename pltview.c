@@ -834,9 +834,10 @@ void render_slice(PlotfileData *pf) {
             
             int x = offset_x + (int)(i * pixel_width);
             /* Flip y-axis: higher j (higher y in data) should be at top of screen */
-            int y = offset_y + (int)((height - 1 - j) * pixel_height);
+            int flipped_j = height - 1 - j;
+            int y = offset_y + (int)(flipped_j * pixel_height);
             int w = (int)((i + 1) * pixel_width) - (int)(i * pixel_width);
-            int h = (int)((j + 1) * pixel_height) - (int)(j * pixel_height);
+            int h = (int)((flipped_j + 1) * pixel_height) - (int)(flipped_j * pixel_height);
             if (w < 1) w = 1;
             if (h < 1) h = 1;
             
