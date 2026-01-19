@@ -23,13 +23,23 @@ Ultra-fast X11 viewer for AMReX plotfiles, inspired by ncview. Written in C for 
 pip install git+https://github.com/wang1202/pltview.git
 ```
 
-**Prerequisites:**
-- **macOS**: Install XQuartz from https://www.xquartz.org/
-- **Linux**: Install X11 development libraries:
-  - Debian/Ubuntu: `sudo apt-get install libx11-dev libxt-dev libxaw7-dev libxmu-dev`
-  - RHEL/CentOS: `sudo yum install libX11-devel libXt-devel libXaw-devel libXmu-devel`
+### Editable Install (For Development)
 
-### From Source
+If you want to modify the code and have changes take effect immediately:
+
+```bash
+git clone https://github.com/wang1202/pltview.git
+cd pltview
+pip install -e .
+```
+
+After editable install, you can modify `pltview.c` and rebuild:
+```bash
+make
+# Changes take effect immediately - pltview command uses the updated binary
+```
+
+### From Source (Manual Build)
 
 ```bash
 git clone https://github.com/wang1202/pltview.git
@@ -37,6 +47,12 @@ cd pltview
 make
 ./pltview plt00100
 ```
+
+**Prerequisites:**
+- **macOS**: Install XQuartz from https://www.xquartz.org/
+- **Linux**: Install X11 development libraries:
+  - Debian/Ubuntu: `sudo apt-get install libx11-dev libxt-dev libxaw7-dev libxmu-dev`
+  - RHEL/CentOS: `sudo yum install libX11-devel libXt-devel libXaw-devel libXmu-devel`
 
 ## Usage
 
