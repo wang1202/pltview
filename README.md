@@ -1,19 +1,18 @@
-# PLTView
+# pltview
 
-Ultra-fast X11 viewer for AMReX plotfiles, inspired by ncview. Written in C for maximum performance.
+A lightweight X11 viewer for AMReX plotfiles, inspired by ncview.
 
 ## Features
 
-- **Ultra-fast rendering**: ~10-100x faster than Python viewers
-- Direct X11 rendering with minimal dependencies
-- Browse variables in AMReX plotfile directories
-- View 2D slices of 3D data along X, Y, Z axes
-- Interactive GUI with mouse controls:
+- **Ultra-fast rendering**: Direct X11 rendering with minimal dependencies (10-100x faster than Python alternatives)
+- **Multi-level AMR support**: Automatically detects and visualizes multiple refinement levels
+- **Interactive 3D slicing**: View 2D slices of 3D data along X, Y, Z axes with wrap-around navigation
+- **Rich mouse interaction**:
   - Hover to see values at cursor position
-  - Click to view 1D line profiles along X, Y, Z directions
-- Multiple colormap options (viridis, jet, turbo, plasma)
-- Aspect ratio preservation
-- Clean white background for publication-ready figures
+  - Click to view 1D line profiles along X, Y, Z directions in popup window
+- **8 colormap options**: viridis, jet, turbo, plasma, hot, cool, gray, magma
+- **Intelligent level handling**: Preserves slice position when switching between AMR levels
+- **Dynamic grid adaptation**: Automatically adjusts to different grid dimensions per level
 
 ## Installation
 
@@ -34,6 +33,7 @@ pip install -e .
 ```
 
 After editable install, you can modify `pltview.c` and rebuild:
+
 ```bash
 make
 # Changes take effect immediately - pltview command uses the updated binary
@@ -49,6 +49,7 @@ make
 ```
 
 **Prerequisites:**
+
 - **macOS**: Install XQuartz from https://www.xquartz.org/
 - **Linux**: Install X11 development libraries:
   - Debian/Ubuntu: `sudo apt-get install libx11-dev libxt-dev libxaw7-dev libxmu-dev`
@@ -64,69 +65,52 @@ pltview plt00100
 
 ## Controls
 
-- **Variable Buttons** (left sidebar): Click to select which variable to visualize
-- **Axis Buttons** (X/Y/Z, bottom): Click to switch viewing axis
-- **Colormap Buttons** (viridis/jet/turbo/plasma, bottom): Select colormap
-- **+/- Buttons** (bottom): Navigate through slices
-- **Colorbar** (right): Shows data range and colormap scale
-- **Mouse Hover**: Shows value at cursor position in info label
-- **Mouse Click**: Opens popup window with line profiles along X, Y, Z directions
+**GUI Layout:**
+- **Left sidebar**: Variable selection buttons (first 10 variables)
+- **Main canvas**: Data visualization with white background and aspect ratio preservation
+- **Right colorbar**: Data range and colormap scale
+- **Bottom controls** (organized in 2 columns):
+  - **Column 1**: Axis buttons (X/Y/Z) and navigation (+/-)
+  - **Column 2**: Level selection (Level 0/Level 1/...) and colormap buttons
 
-The line profile popup displays three plots showing how the variable value changes along each spatial dimension through the clicked point.
+**Mouse Interaction:**
+- **Hover**: Shows value at cursor position in info label at top
+- **Click**: Opens popup window with line profiles along X, Y, Z directions
+
+**Buttons:**
+- **Variable Buttons**: Select which variable to visualize
+- **X/Y/Z Buttons**: Switch viewing axis (perpendicular to slice)
+- **Level Buttons**: Switch between AMR refinement levels (appears when multiple levels detected)
+- **Colormap Buttons**: Choose from 8 colormaps (viridis/jet/turbo/plasma/hot/cool/gray/magma)
+- **+/- Buttons**: Navigate through slices with wrap-around (layer 1 → - → last layer)
+- **Keyboard**: Arrow keys also navigate slices
+
+**Line Profile Popup:**
+The popup window displays three graphs showing how the variable value changes along each spatial dimension (X, Y, Z) through the clicked point, with proper axis labels and tick marks.
 
 ## Requirements
 
-- Python >= 3.8
-- numpy >= 1.20.0
-- matplotlib >= 3.0.0
+- **C Compiler**: gcc or clang
+- **X11 Libraries**: 
+  - macOS: XQuartz (https://www.xquartz.org/)
+  - Linux: libX11, libXt, libXaw, libXmu development packages
+- **Python**: >= 3.6 (for pip installation wrapper)
 
-## Usage
-
-After installation, simply run:
-
-```bash
-# Automatically uses C version if available, otherwise Python version
-pltview plt00100
-
-# Force Python version
-pltview-py plt00100
-
-# Direct C version (if installed to PATH)
-pltview_c plt00100
-```
-
-The `pltview` command will intelligently choose:
-1. **C version** if available and DISPLAY is set (X11 available)
-2. **Python version** as fallback
-
-This gives you the best performance automatically!
-
-## Performance
-
-For typical use cases:
-
-| Dataset Size | Load + Render Time |
-|--------------|-------------------|
-| 100×100×100  | ~0.05s |
-| 320×512×100  | ~0.1s |
-| 1000×1000×1000 | ~0.5s |
-
-*Times shown are for initial load + first render on a typical workstation*
-
-**Ideal for:**
-- Very large datasets (>100M cells)
-- Remote visualization over SSH with X11 forwarding
-- Quick browsing of many plotfiles
-- Minimal system resources
+**Runtime dependencies**: None beyond X11 (no Python runtime dependencies for the viewer itself)
 
 ## File Format
 
 This tool reads AMReX plotfile format (used by ERF, AMReX-Hydro, etc.):
 
 - `Header`: Metadata about variables and grid structure
-- `Level_X/`: Data directories for each AMR level
+- `Level_0/`, `Level_1/`, ...: Data directories for each AMR refinement level
 - `Cell_D_XXXXX`: FAB binary data files for each MPI domain
-- `Cell_H`: Cell data header with box layout information
+- `Cell_H`: Cell data header with box layout and FabOnDisk mapping
+
+**Multi-level Support:**
+- Automatically detects available AMR levels by scanning for `Level_X` directories
+- Handles varying grid dimensions across different refinement levels
+- Preserves slice position when switching levels (clamped to valid range if needed)
 
 Each Cell_D file contains a FAB (Fortran Array Box) header followed by binary double-precision floating-point data in Fortran (column-major) order.
 
