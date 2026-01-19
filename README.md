@@ -4,7 +4,6 @@ A lightweight X11 viewer for AMReX plotfiles, inspired by ncview.
 
 ## Features
 
-- **Ultra-fast rendering**: Direct X11 rendering with minimal dependencies (10-100x faster than Python alternatives)
 - **Multi-level AMR support**: Automatically detects and visualizes multiple refinement levels
 - **Interactive 3D slicing**: View 2D slices of 3D data along X, Y, Z axes with wrap-around navigation
 - **Rich mouse interaction**:
@@ -66,6 +65,7 @@ pltview plt00100
 ## Controls
 
 **GUI Layout:**
+
 - **Left sidebar**: Variable selection buttons (first 10 variables)
 - **Main canvas**: Data visualization with white background and aspect ratio preservation
 - **Right colorbar**: Data range and colormap scale
@@ -74,10 +74,12 @@ pltview plt00100
   - **Column 2**: Level selection (Level 0/Level 1/...) and colormap buttons
 
 **Mouse Interaction:**
+
 - **Hover**: Shows value at cursor position in info label at top
 - **Click**: Opens popup window with line profiles along X, Y, Z directions
 
 **Buttons:**
+
 - **Variable Buttons**: Select which variable to visualize
 - **X/Y/Z Buttons**: Switch viewing axis (perpendicular to slice)
 - **Level Buttons**: Switch between AMR refinement levels (appears when multiple levels detected)
@@ -91,7 +93,7 @@ The popup window displays three graphs showing how the variable value changes al
 ## Requirements
 
 - **C Compiler**: gcc or clang
-- **X11 Libraries**: 
+- **X11 Libraries**:
   - macOS: XQuartz (https://www.xquartz.org/)
   - Linux: libX11, libXt, libXaw, libXmu development packages
 - **Python**: >= 3.6 (for pip installation wrapper)
@@ -108,6 +110,7 @@ This tool reads AMReX plotfile format (used by ERF, AMReX-Hydro, etc.):
 - `Cell_H`: Cell data header with box layout and FabOnDisk mapping
 
 **Multi-level Support:**
+
 - Automatically detects available AMR levels by scanning for `Level_X` directories
 - Handles varying grid dimensions across different refinement levels
 - Preserves slice position when switching levels (clamped to valid range if needed)
