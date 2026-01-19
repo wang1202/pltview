@@ -51,6 +51,8 @@ typedef struct {
     int slice_axis;
     int slice_idx;
     int colormap;  /* 0=viridis, 1=jet, 2=turbo, 3=plasma */
+    int current_level;  /* Current AMR level */
+    int n_levels;       /* Number of AMR levels */
 } PlotfileData;
 
 /* Colormap */
@@ -98,6 +100,7 @@ int render_width = 0, render_height = 0;
 char hover_value_text[256] = "";
 
 /* Function prototypes */
+int detect_levels(PlotfileData *pf);
 int read_header(PlotfileData *pf);
 int read_cell_h(PlotfileData *pf);
 int read_variable_data(PlotfileData *pf, int var_idx);
@@ -108,6 +111,10 @@ RGB viridis_colormap(double t);
 RGB jet_colormap(double t);
 RGB turbo_colormap(double t);
 RGB plasma_colormap(double t);
+RGB hot_colormap(double t);
+RGB cool_colormap(double t);
+RGB gray_colormap(double t);
+RGB magma_colormap(double t);
 RGB get_colormap_rgb(double t, int cmap_type);
 void draw_colorbar(double vmin, double vmax, int cmap_type);
 void cmap_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
@@ -117,6 +124,7 @@ void render_slice(PlotfileData *pf);
 void update_info_label(PlotfileData *pf);
 void var_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void axis_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
+void level_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void nav_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void canvas_expose_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void canvas_motion_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_dispatch);
@@ -126,6 +134,23 @@ void cleanup(PlotfileData *pf);
 
 /* Global pointer for callbacks */
 PlotfileData *global_pf = NULL;
+
+/* Detect number of levels by scanning for Level_X directories */
+int detect_levels(PlotfileData *pf) {
+    char path[MAX_PATH];
+    int level = 0;
+    
+    /* Count how many Level_X directories exist */
+    while (level < 100) {
+        snprintf(path, MAX_PATH, "%s/Level_%d", pf->plotfile_dir, level);
+        DIR *dir = opendir(path);
+        if (!dir) break;
+        closedir(dir);
+        level++;
+    }
+    
+    return level > 0 ? level : 1;
+}
 
 /* Read Header file */
 int read_header(PlotfileData *pf) {
@@ -163,8 +188,11 @@ int read_header(PlotfileData *pf) {
     fgets(line, MAX_LINE, fp);
     pf->time = atof(line);
     
-    /* Skip to domain box (lines: num_levels, low, high, refinement) */
-    fgets(line, MAX_LINE, fp);  /* num levels */
+    /* Number of levels - read from Header but verify by scanning directories */
+    fgets(line, MAX_LINE, fp);
+    int header_levels = atoi(line);
+    
+    /* Skip to domain box (lines: low, high, refinement) */
     fgets(line, MAX_LINE, fp);  /* low */
     fgets(line, MAX_LINE, fp);  /* high */
     fgets(line, MAX_LINE, fp);  /* refinement */
@@ -192,6 +220,9 @@ int read_header(PlotfileData *pf) {
     
     fclose(fp);
     
+    /* Detect actual levels by scanning directories */
+    pf->n_levels = detect_levels(pf);
+    
     printf("Loaded: %s\n", pf->plotfile_dir);
     printf("Variables: %d (", pf->n_vars);
     for (i = 0; i < pf->n_vars && i < 5; i++) {
@@ -201,6 +232,7 @@ int read_header(PlotfileData *pf) {
     printf(")\n");
     printf("Grid: %d x %d x %d\n", pf->grid_dims[0], pf->grid_dims[1], pf->grid_dims[2]);
     printf("Time: %.3f\n", pf->time);
+    printf("Levels: %d (Header says %d)\n", pf->n_levels, header_levels);
     
     return 0;
 }
@@ -212,12 +244,17 @@ int read_cell_h(PlotfileData *pf) {
     FILE *fp;
     int i;
     
-    snprintf(path, MAX_PATH, "%s/Level_0/Cell_H", pf->plotfile_dir);
+    snprintf(path, MAX_PATH, "%s/Level_%d/Cell_H", pf->plotfile_dir, pf->current_level);
     fp = fopen(path, "r");
     if (!fp) {
         fprintf(stderr, "Error: Cannot open %s\n", path);
         return -1;
     }
+    
+    /* Reset grid dimensions for this level */
+    int level_lo[3] = {0, 0, 0};
+    int level_hi[3] = {0, 0, 0};
+    int found_domain = 0;
     
     /* Skip first few lines until we find box definitions */
     int box_count = 0;
@@ -225,16 +262,34 @@ int read_cell_h(PlotfileData *pf) {
         if (strncmp(line, "((", 2) == 0) {
             /* Parse box: ((lo_x,lo_y,lo_z) (hi_x,hi_y,hi_z) ...) */
             char *p = line + 2;
+            int lo[3], hi[3];
             for (i = 0; i < pf->ndim; i++) {
                 while (*p && !isdigit(*p) && *p != '-') p++;
-                pf->boxes[box_count].lo[i] = atoi(p);
+                lo[i] = atoi(p);
+                pf->boxes[box_count].lo[i] = lo[i];
                 while (*p && (isdigit(*p) || *p == '-')) p++;
             }
             for (i = 0; i < pf->ndim; i++) {
                 while (*p && !isdigit(*p) && *p != '-') p++;
-                pf->boxes[box_count].hi[i] = atoi(p);
+                hi[i] = atoi(p);
+                pf->boxes[box_count].hi[i] = hi[i];
                 while (*p && (isdigit(*p) || *p == '-')) p++;
             }
+            
+            /* Track overall domain bounds */
+            if (!found_domain) {
+                for (i = 0; i < pf->ndim; i++) {
+                    level_lo[i] = lo[i];
+                    level_hi[i] = hi[i];
+                }
+                found_domain = 1;
+            } else {
+                for (i = 0; i < pf->ndim; i++) {
+                    if (lo[i] < level_lo[i]) level_lo[i] = lo[i];
+                    if (hi[i] > level_hi[i]) level_hi[i] = hi[i];
+                }
+            }
+            
             box_count++;
         } else if (strncmp(line, "FabOnDisk:", 10) == 0) {
             /* Parse FabOnDisk: Cell_D_XXXXX */
@@ -253,7 +308,15 @@ int read_cell_h(PlotfileData *pf) {
     }
     
     fclose(fp);
-    printf("Found %d boxes\n", pf->n_boxes);
+    
+    /* Update grid dimensions based on level domain */
+    for (i = 0; i < pf->ndim; i++) {
+        pf->grid_dims[i] = level_hi[i] - level_lo[i] + 1;
+    }
+    
+    printf("Level %d: Found %d boxes, Grid: %d x %d x %d\n", 
+           pf->current_level, pf->n_boxes, 
+           pf->grid_dims[0], pf->grid_dims[1], pf->grid_dims[2]);
     return 0;
 }
 
@@ -277,7 +340,7 @@ int read_variable_data(PlotfileData *pf, int var_idx) {
         }
         size_t box_size = box_dims[0] * box_dims[1] * box_dims[2];
         
-        snprintf(path, MAX_PATH, "%s/Level_0/%s", pf->plotfile_dir, box->filename);
+        snprintf(path, MAX_PATH, "%s/Level_%d/%s", pf->plotfile_dir, pf->current_level, box->filename);
         fp = fopen(path, "rb");
         if (!fp) continue;
         
@@ -433,12 +496,89 @@ RGB viridis_colormap(double t) {
     return color;
 }
 
+/* Hot colormap (black -> red -> yellow -> white) */
+RGB hot_colormap(double t) {
+    RGB color;
+    if (t < 0.0) t = 0.0;
+    if (t > 1.0) t = 1.0;
+    
+    if (t < 0.33) {
+        color.r = (unsigned char)(255 * (t / 0.33));
+        color.g = 0;
+        color.b = 0;
+    } else if (t < 0.67) {
+        color.r = 255;
+        color.g = (unsigned char)(255 * ((t - 0.33) / 0.34));
+        color.b = 0;
+    } else {
+        color.r = 255;
+        color.g = 255;
+        color.b = (unsigned char)(255 * ((t - 0.67) / 0.33));
+    }
+    return color;
+}
+
+/* Cool colormap (cyan -> blue -> magenta) */
+RGB cool_colormap(double t) {
+    RGB color;
+    if (t < 0.0) t = 0.0;
+    if (t > 1.0) t = 1.0;
+    
+    color.r = (unsigned char)(255 * t);
+    color.g = (unsigned char)(255 * (1.0 - t));
+    color.b = 255;
+    return color;
+}
+
+/* Gray colormap (black -> white) */
+RGB gray_colormap(double t) {
+    RGB color;
+    if (t < 0.0) t = 0.0;
+    if (t > 1.0) t = 1.0;
+    
+    unsigned char val = (unsigned char)(255 * t);
+    color.r = val;
+    color.g = val;
+    color.b = val;
+    return color;
+}
+
+/* Magma colormap (black -> purple -> orange -> white) */
+RGB magma_colormap(double t) {
+    RGB color;
+    if (t < 0.0) t = 0.0;
+    if (t > 1.0) t = 1.0;
+    
+    if (t < 0.25) {
+        color.r = (unsigned char)(8 + (72 - 8) * (t / 0.25));
+        color.g = (unsigned char)(8 + (22 - 8) * (t / 0.25));
+        color.b = (unsigned char)(40 + (84 - 40) * (t / 0.25));
+    } else if (t < 0.5) {
+        color.r = (unsigned char)(72 + (161 - 72) * ((t - 0.25) / 0.25));
+        color.g = (unsigned char)(22 + (51 - 22) * ((t - 0.25) / 0.25));
+        color.b = (unsigned char)(84 + (118 - 84) * ((t - 0.25) / 0.25));
+    } else if (t < 0.75) {
+        color.r = (unsigned char)(161 + (235 - 161) * ((t - 0.5) / 0.25));
+        color.g = (unsigned char)(51 + (105 - 51) * ((t - 0.5) / 0.25));
+        color.b = (unsigned char)(118 + (81 - 118) * ((t - 0.5) / 0.25));
+    } else {
+        color.r = (unsigned char)(235 + (252 - 235) * ((t - 0.75) / 0.25));
+        color.g = (unsigned char)(105 + (191 - 105) * ((t - 0.75) / 0.25));
+        color.b = (unsigned char)(81 + (170 - 81) * ((t - 0.75) / 0.25));
+    }
+    return color;
+}
+
 /* Get RGB for any colormap */
 RGB get_colormap_rgb(double t, int cmap_type) {
     switch(cmap_type) {
         case 1: return jet_colormap(t);
         case 2: return turbo_colormap(t);
         case 3: return plasma_colormap(t);
+        case 4: return hot_colormap(t);
+        case 5: return cool_colormap(t);
+        case 6: return gray_colormap(t);
+        case 7: return magma_colormap(t);
         default: return viridis_colormap(t);
     }
 }
@@ -559,6 +699,7 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
     canvas_widget = XtCreateManagedWidget("canvas", simpleWidgetClass, form, args, n);
     XtAddCallback(canvas_widget, XtNcallback, canvas_expose_callback, NULL);
     
+    /* COLUMN 1: Axis and Navigation buttons */
     /* Axis buttons box */
     n = 0;
     XtSetArg(args[n], XtNfromVert, canvas_widget); n++;
@@ -578,27 +719,9 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
         XtAddCallback(button, XtNcallback, axis_button_callback, (XtPointer)(long)i);
     }
     
-    /* Colormap buttons */
+    /* Navigation buttons (+/-) in Column 1 */
     n = 0;
     XtSetArg(args[n], XtNfromVert, axis_box); n++;
-    XtSetArg(args[n], XtNfromHoriz, var_box); n++;
-    XtSetArg(args[n], XtNborderWidth, 1); n++;
-    XtSetArg(args[n], XtNorientation, XtorientHorizontal); n++;
-    XtSetArg(args[n], XtNbottom, XawChainBottom); n++;
-    XtSetArg(args[n], XtNleft, XawChainLeft); n++;
-    cmap_box = XtCreateManagedWidget("cmapBox", boxWidgetClass, form, args, n);
-    
-    const char *cmap_labels[] = {"viridis", "jet", "turbo", "plasma"};
-    for (i = 0; i < 4; i++) {
-        n = 0;
-        XtSetArg(args[n], XtNlabel, cmap_labels[i]); n++;
-        button = XtCreateManagedWidget(cmap_labels[i], commandWidgetClass, cmap_box, args, n);
-        XtAddCallback(button, XtNcallback, cmap_button_callback, (XtPointer)(long)i);
-    }
-    
-    /* Navigation buttons (+/-) */
-    n = 0;
-    XtSetArg(args[n], XtNfromVert, cmap_box); n++;
     XtSetArg(args[n], XtNfromHoriz, var_box); n++;
     XtSetArg(args[n], XtNborderWidth, 1); n++;
     XtSetArg(args[n], XtNorientation, XtorientHorizontal); n++;
@@ -612,6 +735,53 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
         XtSetArg(args[n], XtNlabel, nav_labels[i]); n++;
         button = XtCreateManagedWidget(nav_labels[i], commandWidgetClass, nav_box, args, n);
         XtAddCallback(button, XtNcallback, nav_button_callback, (XtPointer)(long)i);
+    }
+    
+    /* COLUMN 2: Level and Colormap buttons */
+    /* Level buttons box (only if multiple levels exist) */
+    Widget level_box = NULL;
+    if (pf->n_levels > 1) {
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, canvas_widget); n++;
+        XtSetArg(args[n], XtNfromHoriz, axis_box); n++;
+        XtSetArg(args[n], XtNborderWidth, 1); n++;
+        XtSetArg(args[n], XtNorientation, XtorientHorizontal); n++;
+        XtSetArg(args[n], XtNbottom, XawChainBottom); n++;
+        XtSetArg(args[n], XtNleft, XawChainLeft); n++;
+        level_box = XtCreateManagedWidget("levelBox", boxWidgetClass, form, args, n);
+        
+        /* Add level buttons (limit to 10 levels) */
+        int max_levels = pf->n_levels < 10 ? pf->n_levels : 10;
+        for (i = 0; i < max_levels; i++) {
+            n = 0;
+            snprintf(label_text, sizeof(label_text), "Level %d", i);
+            XtSetArg(args[n], XtNlabel, label_text); n++;
+            button = XtCreateManagedWidget(label_text, commandWidgetClass, level_box, args, n);
+            XtAddCallback(button, XtNcallback, level_button_callback, (XtPointer)(long)i);
+        }
+    }
+    
+    /* Colormap buttons in Column 2 */
+    n = 0;
+    if (pf->n_levels > 1) {
+        XtSetArg(args[n], XtNfromVert, level_box); n++;
+        XtSetArg(args[n], XtNfromHoriz, axis_box); n++;
+    } else {
+        XtSetArg(args[n], XtNfromVert, canvas_widget); n++;
+        XtSetArg(args[n], XtNfromHoriz, axis_box); n++;
+    }
+    XtSetArg(args[n], XtNborderWidth, 1); n++;
+    XtSetArg(args[n], XtNorientation, XtorientHorizontal); n++;
+    XtSetArg(args[n], XtNbottom, XawChainBottom); n++;
+    XtSetArg(args[n], XtNleft, XawChainLeft); n++;
+    cmap_box = XtCreateManagedWidget("cmapBox", boxWidgetClass, form, args, n);
+    
+    const char *cmap_labels[] = {"viridis", "jet", "turbo", "plasma", "hot", "cool", "gray", "magma"};
+    for (i = 0; i < 8; i++) {
+        n = 0;
+        XtSetArg(args[n], XtNlabel, cmap_labels[i]); n++;
+        button = XtCreateManagedWidget(cmap_labels[i], commandWidgetClass, cmap_box, args, n);
+        XtAddCallback(button, XtNcallback, cmap_button_callback, (XtPointer)(long)i);
     }
     
     /* Colorbar widget */
@@ -670,20 +840,41 @@ void update_info_label(PlotfileData *pf) {
     int max_idx = pf->grid_dims[pf->slice_axis];
     
     if (hover_value_text[0] != '\0') {
-        snprintf(text, sizeof(text), 
-                 "%s | Axis: %s | Layer: %d/%d | Time: %.3f | %s",
-                 pf->variables[pf->current_var],
-                 axis_names[pf->slice_axis],
-                 pf->slice_idx + 1, max_idx,
-                 pf->time,
-                 hover_value_text);
+        if (pf->n_levels > 1) {
+            snprintf(text, sizeof(text), 
+                     "%s | Level: %d | Axis: %s | Layer: %d/%d | Time: %.3f | %s",
+                     pf->variables[pf->current_var],
+                     pf->current_level,
+                     axis_names[pf->slice_axis],
+                     pf->slice_idx + 1, max_idx,
+                     pf->time,
+                     hover_value_text);
+        } else {
+            snprintf(text, sizeof(text), 
+                     "%s | Axis: %s | Layer: %d/%d | Time: %.3f | %s",
+                     pf->variables[pf->current_var],
+                     axis_names[pf->slice_axis],
+                     pf->slice_idx + 1, max_idx,
+                     pf->time,
+                     hover_value_text);
+        }
     } else {
-        snprintf(text, sizeof(text), 
-                 "%s | Axis: %s | Layer: %d/%d | Time: %.3f",
-                 pf->variables[pf->current_var],
-                 axis_names[pf->slice_axis],
-                 pf->slice_idx + 1, max_idx,
-                 pf->time);
+        if (pf->n_levels > 1) {
+            snprintf(text, sizeof(text), 
+                     "%s | Level: %d | Axis: %s | Layer: %d/%d | Time: %.3f",
+                     pf->variables[pf->current_var],
+                     pf->current_level,
+                     axis_names[pf->slice_axis],
+                     pf->slice_idx + 1, max_idx,
+                     pf->time);
+        } else {
+            snprintf(text, sizeof(text), 
+                     "%s | Axis: %s | Layer: %d/%d | Time: %.3f",
+                     pf->variables[pf->current_var],
+                     axis_names[pf->slice_axis],
+                     pf->slice_idx + 1, max_idx,
+                     pf->time);
+        }
     }
     
     Arg args[1];
@@ -714,16 +905,46 @@ void axis_button_callback(Widget w, XtPointer client_data, XtPointer call_data) 
     }
 }
 
+/* Level button callback */
+void level_button_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    int level = (int)(long)client_data;
+    if (global_pf && level < global_pf->n_levels) {
+        global_pf->current_level = level;
+        
+        /* Reload data for new level */
+        global_pf->n_boxes = 0;
+        read_cell_h(global_pf);
+        read_variable_data(global_pf, global_pf->current_var);
+        
+        /* Clamp slice_idx if new level has fewer layers */
+        int max_idx = global_pf->grid_dims[global_pf->slice_axis] - 1;
+        if (global_pf->slice_idx > max_idx) {
+            global_pf->slice_idx = max_idx;
+        }
+        
+        update_info_label(global_pf);
+        render_slice(global_pf);
+    }
+}
+
 /* Navigation button callback (+/-) */
 void nav_button_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     int dir = (int)(long)client_data;  /* 0 = minus, 1 = plus */
     if (global_pf) {
         int max_idx = global_pf->grid_dims[global_pf->slice_axis] - 1;
         
-        if (dir == 1 && global_pf->slice_idx < max_idx) {
+        if (dir == 1) {
+            /* Plus: go to next layer, wrap to 0 if at end */
             global_pf->slice_idx++;
-        } else if (dir == 0 && global_pf->slice_idx > 0) {
+            if (global_pf->slice_idx > max_idx) {
+                global_pf->slice_idx = 0;
+            }
+        } else {
+            /* Minus: go to previous layer, wrap to end if at 0 */
             global_pf->slice_idx--;
+            if (global_pf->slice_idx < 0) {
+                global_pf->slice_idx = max_idx;
+            }
         }
         
         update_info_label(global_pf);
@@ -1229,6 +1450,10 @@ int main(int argc, char **argv) {
     strncpy(pf.plotfile_dir, argv[1], MAX_PATH - 1);
     
     if (read_header(&pf) < 0) return 1;
+    
+    /* Initialize to first level */
+    pf.current_level = 0;
+    
     if (read_cell_h(&pf) < 0) return 1;
     
     /* Load first variable */
@@ -1248,7 +1473,10 @@ int main(int argc, char **argv) {
     printf("\nGUI Controls:\n");
     printf("  Click variable buttons to change variable\n");
     printf("  Click X/Y/Z buttons to switch axis\n");
-    printf("  Click colormap buttons (viridis/jet/turbo/plasma)\n");
+    if (pf.n_levels > 1) {
+        printf("  Click Level 0/Level 1/... buttons to switch level\n");
+    }
+    printf("  Click colormap buttons (viridis/jet/turbo/plasma/hot/cool/gray/magma)\n");
     printf("  Click +/- buttons to navigate layers (or use keyboard arrows)\n\n");
     
     /* Main event loop with expose and keyboard handling */
