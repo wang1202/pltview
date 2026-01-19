@@ -1,26 +1,22 @@
 from setuptools import setup
 from setuptools.command.install import install
-from setuptools.command.develop import develop
-from setuptools.command.build_py import build_py
+from setuptools.command.build import build
 import subprocess
 import os
-import sys
 import shutil
 
 
-class BuildCExtension:
-    """Mixin class to build C extension during install/develop"""
+class BuildC(build):
+    """Custom build command that compiles C version"""
     
     def run(self):
-        # Build the C version first
         self.build_c_version()
-        # Run the original install/develop/build
         super().run()
     
     def build_c_version(self):
         """Compile the C version of pltview"""
         print("=" * 60)
-        print("Building C version of pltview...")
+        print("Building pltview (C version)...")
         print("=" * 60)
         
         # Check if we're on a system with X11
@@ -28,10 +24,13 @@ class BuildCExtension:
         has_x11 = any(os.path.exists(p) for p in x11_paths)
         
         if not has_x11:
-            print("Warning: X11 not found. Skipping C version build.")
-            print("Only Python version will be available.")
-            print("=" * 60)
-            return
+            raise RuntimeError(
+                "X11 development libraries not found!\n"
+                "Please install:\n"
+                "  - macOS: Install XQuartz from https://www.xquartz.org/\n"
+                "  - Debian/Ubuntu: sudo apt-get install libx11-dev libxt-dev libxaw7-dev libxmu-dev\n"
+                "  - RHEL/CentOS: sudo yum install libX11-devel libXt-devel libXaw-devel libXmu-devel"
+            )
         
         # Determine X11 include and lib paths
         if os.path.exists('/opt/X11/include'):
@@ -50,7 +49,7 @@ class BuildCExtension:
         compile_cmd = [
             'gcc', '-O3', '-Wall', '-march=native',
             f'-I{x11_include}',
-            '-o', 'pltview_c', 'pltview.c',
+            '-o', 'pltview', 'pltview.c',
             '-lX11', '-lXt', '-lXaw', '-lXmu', '-lm',
             f'-L{x11_lib}'
         ]
@@ -58,47 +57,40 @@ class BuildCExtension:
         try:
             print(f"Running: {' '.join(compile_cmd)}")
             subprocess.run(compile_cmd, check=True, cwd=os.path.dirname(__file__) or '.')
-            print("✓ C version built successfully!")
+            print("✓ pltview built successfully!")
             print("=" * 60)
         except subprocess.CalledProcessError as e:
-            print(f"Warning: Failed to build C version: {e}")
-            print("Only Python version will be available.")
-            print("=" * 60)
+            raise RuntimeError(f"Failed to build C version: {e}")
         except FileNotFoundError:
-            print("Warning: gcc not found. Skipping C version build.")
-            print("Only Python version will be available.")
-            print("=" * 60)
+            raise RuntimeError("gcc not found. Please install gcc compiler.")
 
 
-class CustomInstall(BuildCExtension, install):
-    """Custom install command that builds C extension"""
+class InstallC(install):
+    """Custom install command that installs C binary"""
     
     def run(self):
+        # Build first
+        self.run_command('build')
+        
+        # Run normal install
         super().run()
-        # Copy pltview_c to scripts directory if it exists
-        if os.path.exists('pltview_c'):
+        
+        # Install the C binary
+        if os.path.exists('pltview'):
             scripts_dir = os.path.join(self.install_scripts)
             os.makedirs(scripts_dir, exist_ok=True)
-            dest = os.path.join(scripts_dir, 'pltview_c')
-            print(f"Installing pltview_c to {dest}")
-            shutil.copy2('pltview_c', dest)
+            dest = os.path.join(scripts_dir, 'pltview')
+            print(f"Installing pltview to {dest}")
+            shutil.copy2('pltview', dest)
             os.chmod(dest, 0o755)
-
-
-class CustomDevelop(BuildCExtension, develop):
-    """Custom develop command that builds C extension"""
-    pass
-
-
-class CustomBuildPy(BuildCExtension, build_py):
-    """Custom build_py command that builds C extension"""
-    pass
+            print("✓ Installation complete!")
+        else:
+            raise RuntimeError("pltview binary not found after build")
 
 
 setup(
     cmdclass={
-        'install': CustomInstall,
-        'develop': CustomDevelop,
-        'build_py': CustomBuildPy,
+        'build': BuildC,
+        'install': InstallC,
     },
 )

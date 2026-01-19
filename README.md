@@ -1,74 +1,62 @@
 # PLTView
 
-A simple viewer for AMReX plotfiles, inspired by ncview. Available in both **Python** (full-featured) and **C** (fast, ncview-style) versions.
-
-## Versions
-
-### Python Version (pltview.py)
-- Full-featured matplotlib-based GUI
-- Interactive controls (sliders, buttons, hover tooltips)
-- Click to view 1D line plots
-- Multiple colormap options
-- Cross-platform (macOS, Linux)
-
-### C Version (pltview.c)
-- Ultra-fast, lightweight (like ncview)
-- Direct X11 rendering
-- Minimal dependencies
-- Keyboard-driven interface
-- **~10-100x faster** for large datasets
+Ultra-fast X11 viewer for AMReX plotfiles, inspired by ncview. Written in C for maximum performance.
 
 ## Features
 
+- **Ultra-fast rendering**: ~10-100x faster than Python viewers
+- Direct X11 rendering with minimal dependencies
 - Browse variables in AMReX plotfile directories
-- View 2D slices of 3D data
-- Navigate through different slice axes (X, Y, Z)
-- Interactive matplotlib-based GUI with XQuartz support
-- Display data statistics (min, max, mean)
-- Hover tooltip showing values at cursor position
-- Click to view 1D line plots along X, Y, Z directions
-- Multiple colormap options
+- View 2D slices of 3D data along X, Y, Z axes
+- Interactive GUI with mouse controls:
+  - Hover to see values at cursor position
+  - Click to view 1D line profiles along X, Y, Z directions
+- Multiple colormap options (viridis, jet, turbo, plasma)
+- Aspect ratio preservation
+- Clean white background for publication-ready figures
 
 ## Installation
 
 ### Via pip (Recommended)
 
-The C version will be automatically built during installation if X11 development libraries are available:
-
 ```bash
-# Install from git repository
 pip install git+https://github.com/wang1202/pltview.git
-
-# The 'pltview' command will automatically use the C version if available,
-# otherwise fall back to the Python version
 ```
 
-**Prerequisites for C version:**
+**Prerequisites:**
 - **macOS**: Install XQuartz from https://www.xquartz.org/
 - **Linux**: Install X11 development libraries:
   - Debian/Ubuntu: `sudo apt-get install libx11-dev libxt-dev libxaw7-dev libxmu-dev`
   - RHEL/CentOS: `sudo yum install libX11-devel libXt-devel libXaw-devel libXmu-devel`
 
-### From Git Repository (Development)
+### From Source
 
 ```bash
-# Clone the repository
 git clone https://github.com/wang1202/pltview.git
 cd pltview
-
-# Install in editable mode (builds C version automatically)
-pip install -e .
+make
+./pltview plt00100
 ```
 
-### Manual C Build
+## Usage
 
-If you want to build only the C version without pip:
+After installation:
 
 ```bash
-cd pltview
-make
-./pltview_c plt00100
+pltview plt00100
 ```
+
+## Controls
+
+- **Variable Buttons** (left sidebar): Click to select which variable to visualize
+- **Axis Buttons** (X/Y/Z, bottom): Click to switch viewing axis
+- **Colormap Buttons** (viridis/jet/turbo/plasma, bottom): Select colormap
+- **+/- Buttons** (bottom): Navigate through slices
+- **Colorbar** (right): Shows data range and colormap scale
+- **Mouse Hover**: Shows value at cursor position in info label
+- **Mouse Click**: Opens popup window with line profiles along X, Y, Z directions
+
+The line profile popup displays three plots showing how the variable value changes along each spatial dimension through the clicked point.
 
 ## Requirements
 
@@ -97,51 +85,23 @@ The `pltview` command will intelligently choose:
 
 This gives you the best performance automatically!
 
-## Controls
-
-### Python Version
-
-- **Variable Buttons** (left panel, top): Click to select which variable to visualize
-- **Colormap Buttons** (left panel, middle): Select colormap (viridis, turbo, jet, etc.)
-- **Slice Axis** (bottom left): Choose X, Y, or Z axis for slicing
-- **Slice Slider** (bottom): Drag to navigate through slices along the chosen axis
-- **Mouse Hover**: Hover over the plot to see coordinates and values
-- **Mouse Click**: Click on any point to open line plots along X, Y, Z directions
-- **Matplotlib Toolbar**: Use built-in tools to zoom, pan, and save images
-
-### C Version (GUI)
-
-- **Variable Buttons** (left sidebar): Click to select which variable to visualize
-- **Axis Buttons** (X/Y/Z, bottom): Click to switch viewing axis
-- **Colormap Buttons** (viridis/jet/turbo/plasma, bottom): Select colormap
-- **Scrollbar** (bottom): Drag to navigate through slices
-- **Colorbar** (right): Shows data range and colormap scale
-- **Text Overlay**: Displays min/max values on the image
-
-The viewer automatically renders the selected slice with the chosen colormap and displays statistics.
-
-## Performance Comparison
+## Performance
 
 For typical use cases:
 
-| Dataset Size | Python Version | C Version | Speedup |
-|--------------|----------------|-----------|---------|
-| 100×100×100  | ~0.5s | ~0.05s | 10x |
-| 320×512×100  | ~2.0s | ~0.1s | 20x |
-| 1000×1000×1000 | ~30s | ~0.5s | 60x |
+| Dataset Size | Load + Render Time |
+|--------------|-------------------|
+| 100×100×100  | ~0.05s |
+| 320×512×100  | ~0.1s |
+| 1000×1000×1000 | ~0.5s |
 
 *Times shown are for initial load + first render on a typical workstation*
 
-**When to use C version:**
+**Ideal for:**
 - Very large datasets (>100M cells)
 - Remote visualization over SSH with X11 forwarding
 - Quick browsing of many plotfiles
-- Minimal system resources available
-
-**When to use Python version:**
-- Need advanced analysis features (line plots, statistics)
-- Want modern GUI with mouse interaction
-- Prefer easier customization/extension
+- Minimal system resources
 
 ## File Format
 

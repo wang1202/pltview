@@ -5,41 +5,21 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pltview"
 version = "0.1.0"
-description = "A simple viewer for AMReX plotfiles, inspired by ncview"
+description = "Ultra-fast C viewer for AMReX plotfiles, inspired by ncview"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.6"
 license = {text = "MIT"}
 authors = [
     {name = "wang1202", email = "aaronaktv@gmail.com"}
 ]
-keywords = ["amrex", "plotfile", "visualization", "scientific computing"]
+keywords = ["amrex", "plotfile", "visualization", "scientific computing", "c", "x11"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: C",
+    "Topic :: Scientific/Engineering :: Visualization",
 ]
-
-dependencies = [
-    "numpy>=1.20.0",
-    "matplotlib>=3.0.0",
-]
-
-[project.optional-dependencies]
-c = []  # C version has no Python dependencies beyond the base requirements
-
-[project.scripts]
-pltview = "pltview_wrapper:main"
-pltview-py = "pltview:main"
 
 [project.urls]
 Homepage = "https://github.com/wang1202/pltview"
 Repository = "https://github.com/wang1202/pltview"
-
-[tool.setuptools]
-py-modules = ["pltview", "pltview_wrapper"]
-include-package-data = true
