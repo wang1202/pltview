@@ -1,5 +1,6 @@
 from setuptools import setup
 from setuptools.command.install import install
+from setuptools.command.develop import develop
 from setuptools.command.build import build
 import subprocess
 import os
@@ -88,9 +89,41 @@ class InstallC(install):
             raise RuntimeError("pltview binary not found after build")
 
 
+class DevelopC(develop):
+    """Custom develop command for editable install"""
+    
+    def run(self):
+        # Build the C version in the source directory
+        builder = BuildC(self.distribution)
+        builder.build_c_version()
+        
+        # Run normal develop
+        super().run()
+        
+        # Create symlink in scripts directory
+        if os.path.exists('pltview'):
+            scripts_dir = os.path.join(self.install_scripts)
+            os.makedirs(scripts_dir, exist_ok=True)
+            dest = os.path.join(scripts_dir, 'pltview')
+            src = os.path.abspath('pltview')
+            
+            # Remove existing file/link
+            if os.path.exists(dest) or os.path.islink(dest):
+                os.remove(dest)
+            
+            # Create symlink
+            os.symlink(src, dest)
+            print(f"Created symlink: {dest} -> {src}")
+            print("✓ Editable installation complete!")
+            print("Note: Run 'make' after modifying pltview.c to rebuild")
+        else:
+            raise RuntimeError("pltview binary not found after build")
+
+
 setup(
     cmdclass={
         'build': BuildC,
         'install': InstallC,
+        'develop': DevelopC,
     },
 )
