@@ -1008,7 +1008,7 @@ void jump_button_callback(Widget w, XtPointer client_data, XtPointer call_data) 
     if (global_pf) {
         Arg args[10];
         int n;
-        Widget dialog, dialog_shell;
+        Widget dialog, dialog_shell, text_widget;
         char prompt[128];
         int max_idx = global_pf->grid_dims[global_pf->slice_axis];
         
@@ -1025,6 +1025,14 @@ void jump_button_callback(Widget w, XtPointer client_data, XtPointer call_data) 
         
         XawDialogAddButton(dialog, "OK", jump_dialog_ok_callback, (XtPointer)dialog);
         XawDialogAddButton(dialog, "Cancel", jump_dialog_cancel_callback, (XtPointer)dialog);
+        
+        XtRealizeWidget(dialog_shell);
+        
+        /* Get the text input widget and set focus to it for X11 forwarding */
+        text_widget = XtNameToWidget(dialog, "value");
+        if (text_widget) {
+            XtSetKeyboardFocus(dialog_shell, text_widget);
+        }
         
         XtPopup(dialog_shell, XtGrabNone);
     }
