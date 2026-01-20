@@ -2,6 +2,8 @@
 
 A lightweight X11 viewer for AMReX plotfiles, inspired by ncview and built with the assistance of Claude Sonnet 4.5.
 
+![Example Screenshot](Example.png)
+
 ## Features
 
 - **Direct X11 rendering** with minimal dependencies (10-100x faster than Python alternatives)
