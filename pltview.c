@@ -70,7 +70,8 @@ typedef struct {
     double vmin, vmax;
     double xmin, xmax;  /* X-axis range */
     char title[128];
-    char xlabel[64];    /* X-axis label */
+    char xlabel[64];    /* X-axis label (or Y-axis for horizontal plots) */
+    char vlabel[64];    /* Value axis label (X-axis for horizontal plots) */
 } PlotData;
 
 /* Popup window data */
@@ -104,6 +105,11 @@ int initial_focus_set = 0;  /* Flag for setting keyboard focus on first expose *
 int dialog_active = 0;  /* Flag to track when a dialog is open */
 Widget active_text_widget = NULL;  /* Text widget in active dialog */
 
+/* Custom colorbar range */
+int use_custom_range = 0;  /* Flag for using custom min/max */
+double custom_vmin = 0.0;
+double custom_vmax = 1.0;
+
 /* Function prototypes */
 int detect_levels(PlotfileData *pf);
 int read_header(PlotfileData *pf);
@@ -132,6 +138,9 @@ void axis_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void level_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void nav_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void jump_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
+void range_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
+void profile_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
+void show_slice_statistics(PlotfileData *pf);
 void update_layer_label(PlotfileData *pf);
 void canvas_expose_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void canvas_motion_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_dispatch);
@@ -769,7 +778,19 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
     XtSetArg(args[n], XtNlabel, "Jump"); n++;
     button = XtCreateManagedWidget("jump", commandWidgetClass, nav_box, args, n);
     XtAddCallback(button, XtNcallback, jump_button_callback, NULL);
-    
+
+    /* Range button for custom colorbar min/max */
+    n = 0;
+    XtSetArg(args[n], XtNlabel, "Range"); n++;
+    button = XtCreateManagedWidget("range", commandWidgetClass, nav_box, args, n);
+    XtAddCallback(button, XtNcallback, range_button_callback, NULL);
+
+    /* Profile button for slice statistics */
+    n = 0;
+    XtSetArg(args[n], XtNlabel, "Profile"); n++;
+    button = XtCreateManagedWidget("profile", commandWidgetClass, nav_box, args, n);
+    XtAddCallback(button, XtNcallback, profile_button_callback, NULL);
+
     /* COLUMN 2: Level and Colormap buttons */
     /* Level buttons box (only if multiple levels exist) */
     Widget level_box = NULL;
@@ -1180,6 +1201,212 @@ void jump_button_callback(Widget w, XtPointer client_data, XtPointer call_data) 
     }
 }
 
+/* Structure for range dialog */
+typedef struct {
+    Widget min_text;
+    Widget max_text;
+    Widget dialog_shell;
+} RangeDialogData;
+
+/* Global pointer to range dialog data for keyboard input */
+RangeDialogData *active_range_dialog = NULL;
+int active_field = 0;  /* 0 = min, 1 = max */
+
+/* Apply custom range callback */
+void range_apply_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    RangeDialogData *data = (RangeDialogData *)client_data;
+
+    if (data) {
+        String min_str, max_str;
+        Arg args[1];
+
+        XtSetArg(args[0], XtNstring, &min_str);
+        XtGetValues(data->min_text, args, 1);
+        XtSetArg(args[0], XtNstring, &max_str);
+        XtGetValues(data->max_text, args, 1);
+
+        if (min_str && strlen(min_str) > 0 && max_str && strlen(max_str) > 0) {
+            double new_min = atof(min_str);
+            double new_max = atof(max_str);
+
+            if (new_min < new_max) {
+                custom_vmin = new_min;
+                custom_vmax = new_max;
+                use_custom_range = 1;
+
+                /* Re-render with new range */
+                if (global_pf) {
+                    render_slice(global_pf);
+                }
+            }
+        }
+
+        /* Close the dialog */
+        XtPopdown(data->dialog_shell);
+        XtDestroyWidget(data->dialog_shell);
+        free(data);
+        dialog_active = 0;
+        active_text_widget = NULL;
+        active_range_dialog = NULL;
+    }
+}
+
+/* Auto range callback - reset to data-driven min/max */
+void range_auto_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    RangeDialogData *data = (RangeDialogData *)client_data;
+
+    use_custom_range = 0;
+
+    /* Re-render with auto range */
+    if (global_pf) {
+        render_slice(global_pf);
+    }
+
+    if (data) {
+        /* Close the dialog */
+        XtPopdown(data->dialog_shell);
+        XtDestroyWidget(data->dialog_shell);
+        free(data);
+        dialog_active = 0;
+        active_text_widget = NULL;
+        active_range_dialog = NULL;
+    }
+}
+
+/* Close range dialog callback */
+void range_close_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    RangeDialogData *data = (RangeDialogData *)client_data;
+
+    if (data) {
+        XtPopdown(data->dialog_shell);
+        XtDestroyWidget(data->dialog_shell);
+        free(data);
+        dialog_active = 0;
+        active_text_widget = NULL;
+        active_range_dialog = NULL;
+    }
+}
+
+/* Focus on min field */
+void range_min_focus_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    RangeDialogData *data = (RangeDialogData *)client_data;
+    if (data) {
+        active_text_widget = data->min_text;
+        active_field = 0;
+    }
+}
+
+/* Focus on max field */
+void range_max_focus_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    RangeDialogData *data = (RangeDialogData *)client_data;
+    if (data) {
+        active_text_widget = data->max_text;
+        active_field = 1;
+    }
+}
+
+/* Range button callback - dialog to set custom min/max */
+void range_button_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    if (global_pf) {
+        Arg args[10];
+        int n;
+        Widget dialog_shell, form, label, button, min_text, max_text;
+        char min_str[64], max_str[64];
+
+        /* Format current values */
+        snprintf(min_str, sizeof(min_str), "%.6e", use_custom_range ? custom_vmin : current_vmin);
+        snprintf(max_str, sizeof(max_str), "%.6e", use_custom_range ? custom_vmax : current_vmax);
+
+        n = 0;
+        XtSetArg(args[n], XtNtitle, "Set Colorbar Range"); n++;
+        dialog_shell = XtCreatePopupShell("rangeDialog", transientShellWidgetClass, toplevel, args, n);
+
+        n = 0;
+        form = XtCreateManagedWidget("form", formWidgetClass, dialog_shell, args, n);
+
+        /* Title label */
+        n = 0;
+        XtSetArg(args[n], XtNlabel, "Set colorbar min/max values:"); n++;
+        XtSetArg(args[n], XtNborderWidth, 0); n++;
+        label = XtCreateManagedWidget("title", labelWidgetClass, form, args, n);
+
+        /* Min label */
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, label); n++;
+        XtSetArg(args[n], XtNlabel, "Min:"); n++;
+        XtSetArg(args[n], XtNborderWidth, 0); n++;
+        Widget min_label = XtCreateManagedWidget("minLabel", labelWidgetClass, form, args, n);
+
+        /* Min text input */
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, label); n++;
+        XtSetArg(args[n], XtNfromHoriz, min_label); n++;
+        XtSetArg(args[n], XtNwidth, 150); n++;
+        XtSetArg(args[n], XtNeditType, XawtextEdit); n++;
+        XtSetArg(args[n], XtNstring, min_str); n++;
+        min_text = XtCreateManagedWidget("minInput", asciiTextWidgetClass, form, args, n);
+
+        /* Max label */
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, min_label); n++;
+        XtSetArg(args[n], XtNlabel, "Max:"); n++;
+        XtSetArg(args[n], XtNborderWidth, 0); n++;
+        Widget max_label = XtCreateManagedWidget("maxLabel", labelWidgetClass, form, args, n);
+
+        /* Max text input */
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, min_label); n++;
+        XtSetArg(args[n], XtNfromHoriz, max_label); n++;
+        XtSetArg(args[n], XtNwidth, 150); n++;
+        XtSetArg(args[n], XtNeditType, XawtextEdit); n++;
+        XtSetArg(args[n], XtNstring, max_str); n++;
+        max_text = XtCreateManagedWidget("maxInput", asciiTextWidgetClass, form, args, n);
+
+        /* Create data structure */
+        RangeDialogData *range_data = malloc(sizeof(RangeDialogData));
+        range_data->min_text = min_text;
+        range_data->max_text = max_text;
+        range_data->dialog_shell = dialog_shell;
+
+        /* Apply button */
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, max_label); n++;
+        XtSetArg(args[n], XtNlabel, "Apply"); n++;
+        button = XtCreateManagedWidget("apply", commandWidgetClass, form, args, n);
+        XtAddCallback(button, XtNcallback, range_apply_callback, (XtPointer)range_data);
+
+        /* Auto button */
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, max_label); n++;
+        XtSetArg(args[n], XtNfromHoriz, button); n++;
+        XtSetArg(args[n], XtNlabel, "Auto"); n++;
+        button = XtCreateManagedWidget("auto", commandWidgetClass, form, args, n);
+        XtAddCallback(button, XtNcallback, range_auto_callback, (XtPointer)range_data);
+
+        /* Close button */
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, max_label); n++;
+        XtSetArg(args[n], XtNfromHoriz, button); n++;
+        XtSetArg(args[n], XtNlabel, "Close"); n++;
+        button = XtCreateManagedWidget("close", commandWidgetClass, form, args, n);
+        XtAddCallback(button, XtNcallback, range_close_callback, (XtPointer)range_data);
+
+        XtRealizeWidget(dialog_shell);
+        XtPopup(dialog_shell, XtGrabExclusive);
+
+        /* Set keyboard focus to min text input */
+        XtSetKeyboardFocus(dialog_shell, min_text);
+        XSync(display, False);
+        Time time = CurrentTime;
+        XtCallAcceptFocus(min_text, &time);
+
+        dialog_active = 1;
+        active_text_widget = min_text;
+        active_range_dialog = range_data;
+        active_field = 0;
+    }
+}
+
 /* Update layer display label */
 void update_layer_label(PlotfileData *pf) {
     char text[32];
@@ -1243,18 +1470,28 @@ void render_slice(PlotfileData *pf) {
     slice_width = width;
     slice_height = height;
     
-    /* Find min/max */
+    /* Find data min/max */
     for (i = 0; i < width * height; i++) {
         if (slice[i] < vmin) vmin = slice[i];
         if (slice[i] > vmax) vmax = slice[i];
     }
-    
+
+    /* Use custom range if set, otherwise use data min/max */
+    double display_vmin, display_vmax;
+    if (use_custom_range) {
+        display_vmin = custom_vmin;
+        display_vmax = custom_vmax;
+    } else {
+        display_vmin = vmin;
+        display_vmax = vmax;
+    }
+
     /* Store current vmin/vmax for colorbar */
-    current_vmin = vmin;
-    current_vmax = vmax;
-    
+    current_vmin = display_vmin;
+    current_vmax = display_vmax;
+
     /* Apply colormap */
-    apply_colormap(slice, width, height, pixel_data, vmin, vmax, pf->colormap);
+    apply_colormap(slice, width, height, pixel_data, display_vmin, display_vmax, pf->colormap);
     
     /* Clear canvas with white background */
     XSetForeground(display, gc, WhitePixel(display, screen));
@@ -1305,15 +1542,19 @@ void render_slice(PlotfileData *pf) {
         }
     }
     
-    /* Draw text overlay */
-    snprintf(stats_text, sizeof(stats_text), "min: %.3e  max: %.3e", vmin, vmax);
+    /* Draw text overlay - show display range (custom if set) */
+    if (use_custom_range) {
+        snprintf(stats_text, sizeof(stats_text), "range: %.3e to %.3e (custom)", display_vmin, display_vmax);
+    } else {
+        snprintf(stats_text, sizeof(stats_text), "min: %.3e  max: %.3e", display_vmin, display_vmax);
+    }
     XSetForeground(display, text_gc, BlackPixel(display, screen));
     XSetBackground(display, text_gc, WhitePixel(display, screen));
-    XDrawImageString(display, canvas, text_gc, 10, canvas_height - 10, 
+    XDrawImageString(display, canvas, text_gc, 10, canvas_height - 10,
                     stats_text, strlen(stats_text));
-    
+
     /* Draw colorbar */
-    draw_colorbar(vmin, vmax, pf->colormap);
+    draw_colorbar(display_vmin, display_vmax, pf->colormap);
     
     XFlush(display);
     
@@ -1475,8 +1716,136 @@ void draw_line_plot(Display *dpy, Window win, GC plot_gc, double *data, double *
         
         XDrawLine(dpy, win, plot_gc, x1, y1, x2, y2);
     }
-    
+
     XFlush(dpy);
+}
+
+/* Draw a horizontal line plot (layer on Y axis, values on X axis) */
+void draw_horizontal_plot(Display *dpy, Window win, GC plot_gc, double *data, double *y_values,
+                          int n_points, int width, int height, double vmin, double vmax,
+                          double ymin, double ymax, const char *title, const char *ylabel,
+                          const char *vlabel) {
+    /* Clear background */
+    XSetForeground(dpy, plot_gc, WhitePixel(dpy, screen));
+    XFillRectangle(dpy, win, plot_gc, 0, 0, width, height);
+
+    /* Draw border */
+    XSetForeground(dpy, plot_gc, BlackPixel(dpy, screen));
+    XDrawRectangle(dpy, win, plot_gc, 0, 0, width - 1, height - 1);
+
+    /* Draw title */
+    if (font) {
+        XSetFont(dpy, plot_gc, font->fid);
+        XDrawString(dpy, win, plot_gc, 10, 20, title, strlen(title));
+    }
+
+    /* Plot area - more space on left for Y axis labels, bottom for X label */
+    int plot_left = 60;
+    int plot_right = width - 20;
+    int plot_top = 40;
+    int plot_bottom = height - 55;
+    int plot_width = plot_right - plot_left;
+    int plot_height = plot_bottom - plot_top;
+
+    if (plot_width <= 0 || plot_height <= 0 || n_points < 2) return;
+
+    /* Draw axes */
+    XDrawLine(dpy, win, plot_gc, plot_left, plot_bottom, plot_right, plot_bottom);  /* x-axis */
+    XDrawLine(dpy, win, plot_gc, plot_left, plot_top, plot_left, plot_bottom);      /* y-axis */
+
+    /* Draw x-axis (value) ticks and labels */
+    char label[64];
+    int num_x_ticks = 4;
+    for (int i = 0; i <= num_x_ticks; i++) {
+        double x_val = vmin + (vmax - vmin) * i / num_x_ticks;
+        int x_pos = plot_left + (int)(plot_width * i / num_x_ticks);
+
+        /* Draw tick mark */
+        XDrawLine(dpy, win, plot_gc, x_pos, plot_bottom, x_pos, plot_bottom + 3);
+
+        /* Draw label */
+        snprintf(label, sizeof(label), "%.2e", x_val);
+        int label_width = XTextWidth(font, label, strlen(label));
+        XDrawString(dpy, win, plot_gc, x_pos - label_width / 2, plot_bottom + 14, label, strlen(label));
+    }
+
+    /* Draw y-axis (layer) ticks and labels */
+    int num_y_ticks = 5;
+    if (n_points < num_y_ticks) num_y_ticks = n_points - 1;
+    for (int i = 0; i <= num_y_ticks; i++) {
+        double y_val = ymin + (ymax - ymin) * i / num_y_ticks;
+        /* Y axis is inverted: higher layer values at top */
+        int y_pos = plot_bottom - (int)(plot_height * i / num_y_ticks);
+
+        /* Draw tick mark */
+        XDrawLine(dpy, win, plot_gc, plot_left - 3, y_pos, plot_left, y_pos);
+
+        /* Draw label */
+        snprintf(label, sizeof(label), "%.0f", y_val);
+        int label_width = XTextWidth(font, label, strlen(label));
+        XDrawString(dpy, win, plot_gc, plot_left - label_width - 5, y_pos + 4, label, strlen(label));
+    }
+
+    /* Draw y-axis label (rotated would be ideal but just put at top) */
+    if (ylabel && ylabel[0]) {
+        XDrawString(dpy, win, plot_gc, 5, plot_top - 5, ylabel, strlen(ylabel));
+    }
+
+    /* Draw x-axis label (value label) centered below the plot */
+    if (vlabel && vlabel[0]) {
+        int vlabel_width = XTextWidth(font, vlabel, strlen(vlabel));
+        XDrawString(dpy, win, plot_gc, plot_left + (plot_width - vlabel_width) / 2,
+                    plot_bottom + 30, vlabel, strlen(vlabel));
+    }
+
+    /* Draw horizontal line plot (layer on Y, value on X) */
+    XSetForeground(dpy, plot_gc, 0x0000FF);  /* Blue */
+    double xrange = vmax - vmin;
+    if (xrange == 0) xrange = 1;
+    double yrange = ymax - ymin;
+    if (yrange == 0) yrange = 1;
+
+    for (int i = 0; i < n_points - 1; i++) {
+        /* X position based on data value */
+        int x1 = plot_left + (int)((data[i] - vmin) / xrange * plot_width);
+        int x2 = plot_left + (int)((data[i + 1] - vmin) / xrange * plot_width);
+        /* Y position based on layer (inverted: higher layer at top) */
+        int y1 = plot_bottom - (int)((y_values[i] - ymin) / yrange * plot_height);
+        int y2 = plot_bottom - (int)((y_values[i + 1] - ymin) / yrange * plot_height);
+
+        /* Clamp to plot area */
+        if (x1 < plot_left) x1 = plot_left;
+        if (x1 > plot_right) x1 = plot_right;
+        if (x2 < plot_left) x2 = plot_left;
+        if (x2 > plot_right) x2 = plot_right;
+
+        XDrawLine(dpy, win, plot_gc, x1, y1, x2, y2);
+    }
+
+    XFlush(dpy);
+}
+
+/* Expose event handler for horizontal plot canvas */
+void horizontal_plot_expose_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_dispatch) {
+    if (event->type != Expose) return;
+
+    PlotData *plot_data = (PlotData *)client_data;
+    if (!plot_data || !plot_data->data) return;
+
+    Window win = XtWindow(w);
+    if (!win) return;
+
+    Dimension width, height;
+    XtVaGetValues(w, XtNwidth, &width, XtNheight, &height, NULL);
+
+    GC plot_gc = XCreateGC(display, win, 0, NULL);
+    /* Note: For horizontal plot, x_values are actually layer indices (Y axis) */
+    /* vmin/vmax are value range (X axis), xmin/xmax are layer range (Y axis) */
+    draw_horizontal_plot(display, win, plot_gc, plot_data->data, plot_data->x_values,
+                         plot_data->n_points, width, height, plot_data->vmin, plot_data->vmax,
+                         plot_data->xmin, plot_data->xmax, plot_data->title, plot_data->xlabel,
+                         plot_data->vlabel);
+    XFreeGC(display, plot_gc);
 }
 
 /* Expose event handler for plot canvas */
@@ -1677,6 +2046,244 @@ void show_line_profiles(PlotfileData *pf, int data_x, int data_y) {
     XtPopup(popup_shell, XtGrabNone);
 }
 
+/* Popup data for profile (3 plots) */
+typedef struct {
+    Widget shell;
+    PlotData *mean_plot;
+    PlotData *std_plot;
+    PlotData *kurtosis_plot;
+} ProfilePopupData;
+
+/* Callback to destroy profile popup and free data */
+void close_profile_popup_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    ProfilePopupData *popup_data = (ProfilePopupData *)client_data;
+
+    if (popup_data) {
+        if (popup_data->mean_plot) {
+            if (popup_data->mean_plot->data) free(popup_data->mean_plot->data);
+            if (popup_data->mean_plot->x_values) free(popup_data->mean_plot->x_values);
+            free(popup_data->mean_plot);
+        }
+        if (popup_data->std_plot) {
+            if (popup_data->std_plot->data) free(popup_data->std_plot->data);
+            /* Note: std_plot->x_values is shared with mean_plot, already freed */
+            free(popup_data->std_plot);
+        }
+        if (popup_data->kurtosis_plot) {
+            if (popup_data->kurtosis_plot->data) free(popup_data->kurtosis_plot->data);
+            /* Note: kurtosis_plot->x_values is shared with mean_plot, already freed */
+            free(popup_data->kurtosis_plot);
+        }
+        XtDestroyWidget(popup_data->shell);
+        free(popup_data);
+    }
+}
+
+/* Show slice statistics (mean and std) along current axis */
+void show_slice_statistics(PlotfileData *pf) {
+    const char *axis_names[] = {"X", "Y", "Z"};
+    int axis = pf->slice_axis;
+    int n_slices = pf->grid_dims[axis];
+
+    /* Determine slice dimensions */
+    int slice_dim1, slice_dim2;
+    if (axis == 2) {  /* Z slices: X-Y planes */
+        slice_dim1 = pf->grid_dims[0];
+        slice_dim2 = pf->grid_dims[1];
+    } else if (axis == 1) {  /* Y slices: X-Z planes */
+        slice_dim1 = pf->grid_dims[0];
+        slice_dim2 = pf->grid_dims[2];
+    } else {  /* X slices: Y-Z planes */
+        slice_dim1 = pf->grid_dims[1];
+        slice_dim2 = pf->grid_dims[2];
+    }
+    int slice_size = slice_dim1 * slice_dim2;
+
+    /* Allocate arrays for mean, std, and kurtosis */
+    double *means = (double *)malloc(n_slices * sizeof(double));
+    double *stds = (double *)malloc(n_slices * sizeof(double));
+    double *kurtosis = (double *)malloc(n_slices * sizeof(double));
+    double *layer_indices = (double *)malloc(n_slices * sizeof(double));
+
+    /* Calculate mean, std, and kurtosis for each slice */
+    for (int s = 0; s < n_slices; s++) {
+        layer_indices[s] = s + 1;  /* 1-indexed for display */
+
+        double sum = 0.0;
+        double sum_sq = 0.0;
+
+        /* First pass: calculate mean and variance */
+        for (int j = 0; j < slice_dim2; j++) {
+            for (int i = 0; i < slice_dim1; i++) {
+                int idx;
+                if (axis == 2) {  /* Z slice */
+                    idx = s * pf->grid_dims[0] * pf->grid_dims[1] + j * pf->grid_dims[0] + i;
+                } else if (axis == 1) {  /* Y slice */
+                    idx = j * pf->grid_dims[0] * pf->grid_dims[1] + s * pf->grid_dims[0] + i;
+                } else {  /* X slice */
+                    idx = j * pf->grid_dims[0] * pf->grid_dims[1] + i * pf->grid_dims[0] + s;
+                }
+                double val = pf->data[idx];
+                sum += val;
+                sum_sq += val * val;
+            }
+        }
+
+        means[s] = sum / slice_size;
+        double variance = (sum_sq / slice_size) - (means[s] * means[s]);
+        stds[s] = (variance > 0) ? sqrt(variance) : 0.0;
+
+        /* Second pass: calculate kurtosis (fourth moment) */
+        double sum_fourth = 0.0;
+        for (int j = 0; j < slice_dim2; j++) {
+            for (int i = 0; i < slice_dim1; i++) {
+                int idx;
+                if (axis == 2) {  /* Z slice */
+                    idx = s * pf->grid_dims[0] * pf->grid_dims[1] + j * pf->grid_dims[0] + i;
+                } else if (axis == 1) {  /* Y slice */
+                    idx = j * pf->grid_dims[0] * pf->grid_dims[1] + s * pf->grid_dims[0] + i;
+                } else {  /* X slice */
+                    idx = j * pf->grid_dims[0] * pf->grid_dims[1] + i * pf->grid_dims[0] + s;
+                }
+                double val = pf->data[idx];
+                double diff = val - means[s];
+                sum_fourth += diff * diff * diff * diff;
+            }
+        }
+
+        /* Excess kurtosis: kurtosis - 3 (normal distribution has kurtosis = 3) */
+        if (stds[s] > 0) {
+            double std4 = stds[s] * stds[s] * stds[s] * stds[s];
+            kurtosis[s] = (sum_fourth / slice_size) / std4 - 3.0;
+        } else {
+            kurtosis[s] = 0.0;
+        }
+    }
+
+    /* Create plot data for mean */
+    PlotData *mean_plot = (PlotData *)malloc(sizeof(PlotData));
+    mean_plot->n_points = n_slices;
+    mean_plot->data = means;
+    mean_plot->x_values = (double *)malloc(n_slices * sizeof(double));
+    memcpy(mean_plot->x_values, layer_indices, n_slices * sizeof(double));
+    mean_plot->vmin = 1e30;
+    mean_plot->vmax = -1e30;
+    for (int i = 0; i < n_slices; i++) {
+        if (means[i] < mean_plot->vmin) mean_plot->vmin = means[i];
+        if (means[i] > mean_plot->vmax) mean_plot->vmax = means[i];
+    }
+    mean_plot->xmin = 1;
+    mean_plot->xmax = n_slices;
+    snprintf(mean_plot->title, sizeof(mean_plot->title), "%s Mean along %s axis",
+             pf->variables[pf->current_var], axis_names[axis]);
+    snprintf(mean_plot->xlabel, sizeof(mean_plot->xlabel), "%s Layer", axis_names[axis]);
+    snprintf(mean_plot->vlabel, sizeof(mean_plot->vlabel), "%s Mean", pf->variables[pf->current_var]);
+
+    /* Create plot data for std */
+    PlotData *std_plot = (PlotData *)malloc(sizeof(PlotData));
+    std_plot->n_points = n_slices;
+    std_plot->data = stds;
+    std_plot->x_values = layer_indices;  /* Share with mean, will be freed once */
+    std_plot->vmin = 1e30;
+    std_plot->vmax = -1e30;
+    for (int i = 0; i < n_slices; i++) {
+        if (stds[i] < std_plot->vmin) std_plot->vmin = stds[i];
+        if (stds[i] > std_plot->vmax) std_plot->vmax = stds[i];
+    }
+    std_plot->xmin = 1;
+    std_plot->xmax = n_slices;
+    snprintf(std_plot->title, sizeof(std_plot->title), "%s Std Dev along %s axis",
+             pf->variables[pf->current_var], axis_names[axis]);
+    snprintf(std_plot->xlabel, sizeof(std_plot->xlabel), "%s Layer", axis_names[axis]);
+    snprintf(std_plot->vlabel, sizeof(std_plot->vlabel), "%s Std", pf->variables[pf->current_var]);
+
+    /* Create plot data for kurtosis */
+    PlotData *kurtosis_plot = (PlotData *)malloc(sizeof(PlotData));
+    kurtosis_plot->n_points = n_slices;
+    kurtosis_plot->data = kurtosis;
+    kurtosis_plot->x_values = layer_indices;  /* Share with mean, will be freed once */
+    kurtosis_plot->vmin = 1e30;
+    kurtosis_plot->vmax = -1e30;
+    for (int i = 0; i < n_slices; i++) {
+        if (kurtosis[i] < kurtosis_plot->vmin) kurtosis_plot->vmin = kurtosis[i];
+        if (kurtosis[i] > kurtosis_plot->vmax) kurtosis_plot->vmax = kurtosis[i];
+    }
+    kurtosis_plot->xmin = 1;
+    kurtosis_plot->xmax = n_slices;
+    snprintf(kurtosis_plot->title, sizeof(kurtosis_plot->title), "%s Kurtosis along %s axis",
+             pf->variables[pf->current_var], axis_names[axis]);
+    snprintf(kurtosis_plot->xlabel, sizeof(kurtosis_plot->xlabel), "%s Layer", axis_names[axis]);
+    snprintf(kurtosis_plot->vlabel, sizeof(kurtosis_plot->vlabel), "%s Kurtosis", pf->variables[pf->current_var]);
+
+    /* Create popup data structure */
+    ProfilePopupData *popup_data = (ProfilePopupData *)malloc(sizeof(ProfilePopupData));
+    popup_data->mean_plot = mean_plot;
+    popup_data->std_plot = std_plot;
+    popup_data->kurtosis_plot = kurtosis_plot;
+
+    /* Create popup shell - wider for 3 side-by-side plots */
+    Widget popup_shell = XtVaCreatePopupShell("Slice Statistics",
+        transientShellWidgetClass, toplevel,
+        XtNwidth, 1200,
+        XtNheight, 450,
+        NULL);
+
+    popup_data->shell = popup_shell;
+
+    Widget popup_form = XtVaCreateManagedWidget("form",
+        formWidgetClass, popup_shell,
+        NULL);
+
+    /* Mean plot canvas - left */
+    Widget mean_canvas = XtVaCreateManagedWidget("mean_plot",
+        simpleWidgetClass, popup_form,
+        XtNwidth, 380,
+        XtNheight, 350,
+        XtNborderWidth, 1,
+        NULL);
+
+    /* Std plot canvas - middle (next to mean) */
+    Widget std_canvas = XtVaCreateManagedWidget("std_plot",
+        simpleWidgetClass, popup_form,
+        XtNfromHoriz, mean_canvas,
+        XtNwidth, 380,
+        XtNheight, 350,
+        XtNborderWidth, 1,
+        NULL);
+
+    /* Kurtosis plot canvas - right (next to std) */
+    Widget kurtosis_canvas = XtVaCreateManagedWidget("kurtosis_plot",
+        simpleWidgetClass, popup_form,
+        XtNfromHoriz, std_canvas,
+        XtNwidth, 380,
+        XtNheight, 350,
+        XtNborderWidth, 1,
+        NULL);
+
+    /* Add expose event handlers - using horizontal plot (layer on Y, value on X) */
+    XtAddEventHandler(mean_canvas, ExposureMask, False, horizontal_plot_expose_handler, mean_plot);
+    XtAddEventHandler(std_canvas, ExposureMask, False, horizontal_plot_expose_handler, std_plot);
+    XtAddEventHandler(kurtosis_canvas, ExposureMask, False, horizontal_plot_expose_handler, kurtosis_plot);
+
+    /* Close button - below the plots */
+    Widget close_button = XtVaCreateManagedWidget("Close",
+        commandWidgetClass, popup_form,
+        XtNfromVert, mean_canvas,
+        NULL);
+
+    XtAddCallback(close_button, XtNcallback, close_profile_popup_callback, popup_data);
+
+    /* Show popup */
+    XtPopup(popup_shell, XtGrabNone);
+}
+
+/* Profile button callback */
+void profile_button_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    if (global_pf && global_pf->data) {
+        show_slice_statistics(global_pf);
+    }
+}
+
 void cleanup(PlotfileData *pf) {
     if (pf->data) free(pf->data);
     if (pixel_data) free(pixel_data);
@@ -1769,6 +2376,15 @@ int main(int argc, char **argv) {
                         new_value[current_len - 1] = '\0';
                         XtSetArg(args[0], XtNstring, new_value);
                         XtSetValues(active_text_widget, args, 1);
+                    }
+                } else if (keysym == XK_Tab && active_range_dialog) {
+                    /* Switch between min and max fields in range dialog */
+                    if (active_field == 0) {
+                        active_text_widget = active_range_dialog->max_text;
+                        active_field = 1;
+                    } else {
+                        active_text_widget = active_range_dialog->min_text;
+                        active_field = 0;
                     }
                 } else if (keysym == XK_Return || keysym == XK_KP_Enter) {
                     /* Let Enter be handled by dispatch for button activation */
