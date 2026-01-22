@@ -31,6 +31,7 @@
 #define MAX_BOXES 1024
 #define MAX_PATH 512
 #define MAX_LINE 1024
+#define MAX_TIMESTEPS 1024
 
 /* Data structures */
 typedef struct {
@@ -110,6 +111,13 @@ int use_custom_range = 0;  /* Flag for using custom min/max */
 double custom_vmin = 0.0;
 double custom_vmax = 1.0;
 
+/* Multi-timestep support */
+char *timestep_paths[MAX_TIMESTEPS];  /* Array of plotfile paths */
+int timestep_numbers[MAX_TIMESTEPS];   /* Numerical values for sorting */
+int n_timesteps = 0;                   /* Number of timesteps found */
+int current_timestep = 0;              /* Current timestep index */
+Widget time_label = NULL;              /* Time step display label */
+
 /* Function prototypes */
 int detect_levels(PlotfileData *pf);
 int read_header(PlotfileData *pf);
@@ -150,6 +158,10 @@ void canvas_motion_handler(Widget w, XtPointer client_data, XEvent *event, Boole
 void canvas_button_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_dispatch);
 void show_line_profiles(PlotfileData *pf, int data_x, int data_y);
 void cleanup(PlotfileData *pf);
+int scan_timesteps(const char *base_dir);
+void switch_timestep(PlotfileData *pf, int new_timestep);
+void time_nav_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
+void update_time_label(void);
 
 /* Global pointer for callbacks */
 PlotfileData *global_pf = NULL;
@@ -169,6 +181,145 @@ int detect_levels(PlotfileData *pf) {
     }
     
     return level > 0 ? level : 1;
+}
+
+/* Comparison function for sorting timesteps */
+int compare_timesteps(const void *a, const void *b) {
+    int idx_a = *(const int *)a;
+    int idx_b = *(const int *)b;
+    return timestep_numbers[idx_a] - timestep_numbers[idx_b];
+}
+
+/* Scan directory for plotfiles and sort them by number */
+int scan_timesteps(const char *base_dir) {
+    DIR *dir;
+    struct dirent *entry;
+    char check_path[MAX_PATH];
+    int indices[MAX_TIMESTEPS];
+
+    dir = opendir(base_dir);
+    if (!dir) {
+        fprintf(stderr, "Error: Cannot open directory %s\n", base_dir);
+        return -1;
+    }
+
+    n_timesteps = 0;
+
+    while ((entry = readdir(dir)) != NULL && n_timesteps < MAX_TIMESTEPS) {
+        /* Check if entry starts with "plt" */
+        if (strncmp(entry->d_name, "plt", 3) == 0) {
+            /* Check if it's a valid plotfile directory (has Header file) */
+            snprintf(check_path, MAX_PATH, "%s/%s/Header", base_dir, entry->d_name);
+            FILE *fp = fopen(check_path, "r");
+            if (fp) {
+                fclose(fp);
+
+                /* Extract number from plotfile name */
+                int num = atoi(entry->d_name + 3);
+
+                /* Allocate and store path */
+                timestep_paths[n_timesteps] = (char *)malloc(MAX_PATH);
+                snprintf(timestep_paths[n_timesteps], MAX_PATH, "%s/%s", base_dir, entry->d_name);
+                timestep_numbers[n_timesteps] = num;
+                indices[n_timesteps] = n_timesteps;
+                n_timesteps++;
+            }
+        }
+    }
+
+    closedir(dir);
+
+    if (n_timesteps == 0) {
+        return -1;
+    }
+
+    /* Sort indices by timestep number */
+    qsort(indices, n_timesteps, sizeof(int), compare_timesteps);
+
+    /* Reorder arrays based on sorted indices */
+    char *temp_paths[MAX_TIMESTEPS];
+    int temp_numbers[MAX_TIMESTEPS];
+
+    for (int i = 0; i < n_timesteps; i++) {
+        temp_paths[i] = timestep_paths[indices[i]];
+        temp_numbers[i] = timestep_numbers[indices[i]];
+    }
+
+    for (int i = 0; i < n_timesteps; i++) {
+        timestep_paths[i] = temp_paths[i];
+        timestep_numbers[i] = temp_numbers[i];
+    }
+
+    printf("Found %d timesteps\n", n_timesteps);
+    return n_timesteps;
+}
+
+/* Switch to a different timestep */
+void switch_timestep(PlotfileData *pf, int new_timestep) {
+    if (new_timestep < 0 || new_timestep >= n_timesteps) return;
+
+    current_timestep = new_timestep;
+
+    /* Update plotfile directory */
+    strncpy(pf->plotfile_dir, timestep_paths[current_timestep], MAX_PATH - 1);
+
+    /* Re-read header for new timestep */
+    read_header(pf);
+
+    /* Reset boxes and re-read cell data */
+    pf->n_boxes = 0;
+    read_cell_h(pf);
+
+    /* Clamp slice_idx if new data has fewer layers */
+    int max_idx = pf->grid_dims[pf->slice_axis] - 1;
+    if (pf->slice_idx > max_idx) {
+        pf->slice_idx = max_idx;
+    }
+
+    /* Re-read variable data */
+    read_variable_data(pf, pf->current_var);
+
+    /* Update UI */
+    update_time_label();
+    update_layer_label(pf);
+    update_info_label(pf);
+    render_slice(pf);
+}
+
+/* Update time step label */
+void update_time_label(void) {
+    if (time_label && n_timesteps > 0) {
+        char text[32];
+        snprintf(text, sizeof(text), "%d/%d", current_timestep + 1, n_timesteps);
+        Arg args[1];
+        XtSetArg(args[0], XtNlabel, text);
+        XtSetValues(time_label, args, 1);
+    }
+}
+
+/* Time navigation button callback */
+void time_nav_button_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    int dir = (int)(long)client_data;  /* 0 = prev (<), 1 = next (>) */
+
+    if (global_pf && n_timesteps > 1) {
+        int new_timestep = current_timestep;
+
+        if (dir == 1) {
+            /* Next: go to next timestep, wrap to 0 if at end */
+            new_timestep++;
+            if (new_timestep >= n_timesteps) {
+                new_timestep = 0;
+            }
+        } else {
+            /* Prev: go to previous timestep, wrap to end if at 0 */
+            new_timestep--;
+            if (new_timestep < 0) {
+                new_timestep = n_timesteps - 1;
+            }
+        }
+
+        switch_timestep(global_pf, new_timestep);
+    }
 }
 
 /* Read Header file */
@@ -794,6 +945,31 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
     XtSetArg(args[n], XtNlabel, "Profile"); n++;
     button = XtCreateManagedWidget("profile", commandWidgetClass, nav_box, args, n);
     XtAddCallback(button, XtNcallback, profile_button_callback, NULL);
+
+    /* Time navigation (only if multiple timesteps) */
+    if (n_timesteps > 1) {
+        /* Time label */
+        n = 0;
+        XtSetArg(args[n], XtNlabel, "Time"); n++;
+        XtSetArg(args[n], XtNborderWidth, 0); n++;
+        XtCreateManagedWidget("timeText", labelWidgetClass, nav_box, args, n);
+
+        /* Time navigation buttons (</>)  */
+        const char *time_labels[] = {"<", ">"};
+        for (i = 0; i < 2; i++) {
+            n = 0;
+            XtSetArg(args[n], XtNlabel, time_labels[i]); n++;
+            button = XtCreateManagedWidget(time_labels[i], commandWidgetClass, nav_box, args, n);
+            XtAddCallback(button, XtNcallback, time_nav_button_callback, (XtPointer)(long)i);
+        }
+
+        /* Time index display label */
+        n = 0;
+        XtSetArg(args[n], XtNlabel, "1/1"); n++;
+        XtSetArg(args[n], XtNwidth, 60); n++;
+        XtSetArg(args[n], XtNborderWidth, 1); n++;
+        time_label = XtCreateManagedWidget("timeLabel", labelWidgetClass, nav_box, args, n);
+    }
 
     /* COLUMN 2: Tools box (Colormap, Range, Distrib) */
     Widget tools_box;
@@ -2679,36 +2855,60 @@ void cleanup(PlotfileData *pf) {
 int main(int argc, char **argv) {
     PlotfileData pf = {0};
     Arg args[2];
-    
+    char check_path[MAX_PATH];
+
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <plotfile_directory>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <plotfile_directory or directory_containing_plotfiles>\n", argv[0]);
         return 1;
     }
-    
-    strncpy(pf.plotfile_dir, argv[1], MAX_PATH - 1);
-    
+
+    /* Check if argument is a single plotfile or a directory containing plotfiles */
+    snprintf(check_path, MAX_PATH, "%s/Header", argv[1]);
+    FILE *fp = fopen(check_path, "r");
+
+    if (fp) {
+        /* Single plotfile mode */
+        fclose(fp);
+        n_timesteps = 1;
+        current_timestep = 0;
+        timestep_paths[0] = strdup(argv[1]);
+        timestep_numbers[0] = 0;
+        strncpy(pf.plotfile_dir, argv[1], MAX_PATH - 1);
+        printf("Single plotfile mode: %s\n", argv[1]);
+    } else {
+        /* Try multi-timestep mode - scan directory for plotfiles */
+        if (scan_timesteps(argv[1]) <= 0) {
+            fprintf(stderr, "Error: No valid plotfiles found in %s\n", argv[1]);
+            return 1;
+        }
+        current_timestep = 0;
+        strncpy(pf.plotfile_dir, timestep_paths[0], MAX_PATH - 1);
+        printf("Multi-timestep mode: %d timesteps found\n", n_timesteps);
+    }
+
     if (read_header(&pf) < 0) return 1;
-    
+
     /* Initialize to first level */
     pf.current_level = 0;
-    
+
     if (read_cell_h(&pf) < 0) return 1;
-    
+
     /* Load first variable */
     pf.current_var = 0;
     pf.slice_axis = 2;  /* Z */
     pf.slice_idx = 0;  /* Start at first layer */
     pf.colormap = 0;  /* viridis */
-    
+
     read_variable_data(&pf, 0);
-    
+
     /* Initialize GUI */
     init_gui(&pf, argc, argv);
-    
+
     update_layer_label(&pf);
+    update_time_label();
     update_info_label(&pf);
     render_slice(&pf);
-    
+
     printf("\nGUI Controls:\n");
     printf("  Click variable buttons to change variable\n");
     printf("  Click X/Y/Z buttons to switch axis\n");
@@ -2716,7 +2916,11 @@ int main(int argc, char **argv) {
         printf("  Click Level 0/Level 1/... buttons to switch level\n");
     }
     printf("  Click Colormap button to select colormap (or use keyboard 1-8)\n");
-    printf("  Click v/^ buttons to navigate layers (or use keyboard Up/Down arrows)\n\n");
+    printf("  Click v/^ buttons to navigate layers (or use keyboard Up/Down arrows)\n");
+    if (n_timesteps > 1) {
+        printf("  Click </> buttons to navigate timesteps (or use keyboard Left/Right arrows)\n");
+    }
+    printf("\n");
     
     /* Main event loop with expose and keyboard handling */
     XtAppContext app_context = XtWidgetToApplicationContext(toplevel);
@@ -2811,8 +3015,20 @@ int main(int argc, char **argv) {
                 /* Switch colormap with 1-8 keys */
                 global_pf->colormap = key - XK_1;
                 changed = 1;
+            } else if (key == XK_Right && n_timesteps > 1) {
+                /* Next timestep */
+                int new_timestep = current_timestep + 1;
+                if (new_timestep >= n_timesteps) new_timestep = 0;
+                switch_timestep(global_pf, new_timestep);
+                continue;  /* switch_timestep handles all updates */
+            } else if (key == XK_Left && n_timesteps > 1) {
+                /* Previous timestep */
+                int new_timestep = current_timestep - 1;
+                if (new_timestep < 0) new_timestep = n_timesteps - 1;
+                switch_timestep(global_pf, new_timestep);
+                continue;  /* switch_timestep handles all updates */
             }
-            
+
             if (changed) {
                 update_layer_label(global_pf);
                 update_info_label(global_pf);
