@@ -761,15 +761,22 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
     XtSetArg(args[n], XtNleft, XawChainLeft); n++;
     nav_box = XtCreateManagedWidget("navBox", boxWidgetClass, form, args, n);
     
-    const char *nav_labels[] = {"-", "+"};
+    /* Layer label */
+    n = 0;
+    XtSetArg(args[n], XtNlabel, "Layer"); n++;
+    XtSetArg(args[n], XtNborderWidth, 0); n++;
+    XtCreateManagedWidget("layerText", labelWidgetClass, nav_box, args, n);
+
+    /* Navigation buttons (↓/↑) */
+    const char *nav_labels[] = {"↓", "↑"};
     for (i = 0; i < 2; i++) {
         n = 0;
         XtSetArg(args[n], XtNlabel, nav_labels[i]); n++;
         button = XtCreateManagedWidget(nav_labels[i], commandWidgetClass, nav_box, args, n);
         XtAddCallback(button, XtNcallback, nav_button_callback, (XtPointer)(long)i);
     }
-    
-    /* Layer display label */
+
+    /* Layer index display label */
     n = 0;
     XtSetArg(args[n], XtNlabel, "1/1"); n++;
     XtSetArg(args[n], XtNwidth, 60); n++;
@@ -2708,8 +2715,8 @@ int main(int argc, char **argv) {
     if (pf.n_levels > 1) {
         printf("  Click Level 0/Level 1/... buttons to switch level\n");
     }
-    printf("  Click colormap buttons (viridis/jet/turbo/plasma/hot/cool/gray/magma)\n");
-    printf("  Click +/- buttons to navigate layers (or use keyboard arrows)\n\n");
+    printf("  Click Colormap button to select colormap (or use keyboard 1-8)\n");
+    printf("  Click ↓/↑ buttons to navigate layers (or use keyboard Up/Down arrows)\n\n");
     
     /* Main event loop with expose and keyboard handling */
     XtAppContext app_context = XtWidgetToApplicationContext(toplevel);
@@ -2790,12 +2797,12 @@ int main(int argc, char **argv) {
             int max_idx = global_pf->grid_dims[global_pf->slice_axis] - 1;
             int changed = 0;
             
-            if (key == XK_plus || key == XK_equal || key == XK_Right) {
+            if (key == XK_plus || key == XK_equal || key == XK_Up) {
                 if (global_pf->slice_idx < max_idx) {
                     global_pf->slice_idx++;
                     changed = 1;
                 }
-            } else if (key == XK_minus || key == XK_underscore || key == XK_Left) {
+            } else if (key == XK_minus || key == XK_underscore || key == XK_Down) {
                 if (global_pf->slice_idx > 0) {
                     global_pf->slice_idx--;
                     changed = 1;
