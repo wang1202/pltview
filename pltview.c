@@ -209,6 +209,18 @@ int scan_timesteps(const char *base_dir, const char *prefix) {
     while ((entry = readdir(dir)) != NULL && n_timesteps < MAX_TIMESTEPS) {
         /* Check if entry starts with the specified prefix */
         if (strncmp(entry->d_name, prefix, prefix_len) == 0) {
+            /* Ensure ALL characters after prefix are digits (to avoid plt matching plt2d) */
+            const char *suffix = entry->d_name + prefix_len;
+            int all_digits = 1;
+            if (*suffix == '\0') all_digits = 0;  /* Must have at least one digit */
+            for (const char *p = suffix; *p != '\0'; p++) {
+                if (!isdigit(*p)) {
+                    all_digits = 0;
+                    break;
+                }
+            }
+            if (!all_digits) continue;
+
             /* Check if it's a valid plotfile directory (has Header file) */
             snprintf(check_path, MAX_PATH, "%s/%s/Header", base_dir, entry->d_name);
             FILE *fp = fopen(check_path, "r");
