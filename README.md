@@ -14,8 +14,9 @@ A lightweight X11 viewer for AMReX plotfiles, inspired by ncview and built with 
   - Hover to see values at cursor position
   - Click to view 1D line profiles along X, Y, Z directions in popup window
 - **Statistical analysis**:
-  - Profile: View mean, std, and kurtosis along the slicing axis
+  - Profile: View mean, std, and skewness along the slicing axis
   - Distribution: View histogram of values in current layer
+  - Series: View time series of mean, std, and skewness across all timesteps (multi-timestep mode)
 - **Custom colorbar range**: Set min/max values manually or use auto-scaling
 - **Multiple colormap options**: viridis, jet, turbo, plasma, hot, cool, gray, magma (selectable via popup or keys 1-8)
 - **Level handling**: Preserves slice position when switching between AMR levels
@@ -89,9 +90,8 @@ pltview /path/to/simulation/output plt2d
 - **Right colorbar**: Data range and colormap scale
 - **Bottom controls** (organized in columns):
   - **Column 1**: Axis (X/Y/Z), Layer navigation (v/^), Jump, Profile
-  - **Column 2**: Colormap, Range, Distrib (distribution histogram)
-  - **Column 3**: Time navigation (`<`/`>`) - appears in multi-timestep mode
-  - **Column 4**: Level selection (Level 0/Level 1/...) - appears when multiple AMR levels detected
+  - **Column 2**: Colormap, Range, Distrib, and Time controls (`<`/`>`, Jump, Series) - Time controls appear only in multi-timestep mode
+  - **Column 3**: Level selection (Level 0/Level 1/...) - appears when multiple AMR levels detected
 
 **Mouse Interaction:**
 
@@ -104,11 +104,13 @@ pltview /path/to/simulation/output plt2d
 - **X/Y/Z Buttons**: Switch viewing axis (perpendicular to slice)
 - **v/^ Buttons**: Navigate through layers with wrap-around
 - **Jump**: Quick jump to specific layer positions (First, 1/4, Middle, 3/4, Last) or type a layer number
-- **Profile**: Show mean, std, and kurtosis statistics along the current axis
+- **Profile**: Show mean, std, and skewness statistics along the current axis
 - **Colormap**: Open popup to select from 8 colormaps (1-8: viridis/jet/turbo/plasma/hot/cool/gray/magma)
 - **Range**: Set custom colorbar min/max values, or reset to auto
 - **Distrib**: Show histogram distribution of values in the current layer
-- **</>** Buttons: Navigate through timesteps (multi-timestep mode only)
+- **Time `<`/`>`**: Navigate through timesteps (multi-timestep mode only)
+- **Time Jump**: Quick jump to specific timestep (First, 1/4, Middle, 3/4, Last, or type a number)
+- **Series**: Show time series of mean, std, and skewness for current slice across all timesteps
 - **Level Buttons**: Switch between AMR refinement levels (appears when multiple levels detected)
 
 **Keyboard Shortcuts:**

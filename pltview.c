@@ -162,6 +162,9 @@ int scan_timesteps(const char *base_dir, const char *prefix);
 void switch_timestep(PlotfileData *pf, int new_timestep);
 void time_nav_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void update_time_label(void);
+void time_jump_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
+void time_series_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
+void show_time_series(PlotfileData *pf);
 
 /* Global pointer for callbacks */
 PlotfileData *global_pf = NULL;
@@ -332,6 +335,185 @@ void time_nav_button_callback(Widget w, XtPointer client_data, XtPointer call_da
         }
 
         switch_timestep(global_pf, new_timestep);
+    }
+}
+
+/* Jump to specific timestep - button-based callback */
+void time_jump_to_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    long time_type = (long)client_data;
+
+    if (global_pf && n_timesteps > 1) {
+        int new_timestep = current_timestep;
+
+        switch (time_type) {
+            case 0: new_timestep = 0; break;                    /* First */
+            case 1: new_timestep = n_timesteps - 1; break;      /* Last */
+            case 2: new_timestep = n_timesteps / 2; break;      /* Middle */
+            case 3: new_timestep = n_timesteps / 4; break;      /* 1/4 */
+            case 4: new_timestep = 3 * n_timesteps / 4; break;  /* 3/4 */
+        }
+
+        if (new_timestep >= 0 && new_timestep < n_timesteps) {
+            switch_timestep(global_pf, new_timestep);
+        }
+    }
+
+    /* Close the dialog */
+    Widget shell = XtParent(XtParent(w));
+    XtPopdown(shell);
+    XtDestroyWidget(shell);
+}
+
+/* Structure to pass both text widget and shell to callback */
+typedef struct {
+    Widget text_widget;
+    Widget dialog_shell;
+} TimeJumpDialogData;
+
+/* Jump to typed timestep number */
+void time_jump_to_typed_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    TimeJumpDialogData *data = (TimeJumpDialogData *)client_data;
+
+    if (global_pf && data && n_timesteps > 1) {
+        String value;
+        Arg args[1];
+        XtSetArg(args[0], XtNstring, &value);
+        XtGetValues(data->text_widget, args, 1);
+
+        if (value && strlen(value) > 0) {
+            int timestep = atoi(value);
+
+            /* Convert from 1-indexed to 0-indexed and clamp */
+            timestep = timestep - 1;
+            if (timestep < 0) timestep = 0;
+            if (timestep >= n_timesteps) timestep = n_timesteps - 1;
+
+            switch_timestep(global_pf, timestep);
+        }
+
+        /* Close the dialog */
+        XtPopdown(data->dialog_shell);
+        XtDestroyWidget(data->dialog_shell);
+        free(data);
+    }
+}
+
+/* Close time jump dialog */
+void time_jump_dialog_close_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    Widget shell = (Widget)client_data;
+    XtPopdown(shell);
+    XtDestroyWidget(shell);
+}
+
+/* Time Jump button callback */
+void time_jump_button_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    if (global_pf && n_timesteps > 1) {
+        Arg args[10];
+        int n;
+        Widget dialog_shell, form, label, button, text_widget, text_label;
+        char msg[128];
+
+        snprintf(msg, sizeof(msg), "Jump to timestep (1-%d)", n_timesteps);
+
+        n = 0;
+        XtSetArg(args[n], XtNtitle, "Jump to Timestep"); n++;
+        dialog_shell = XtCreatePopupShell("timeJumpDialog", transientShellWidgetClass, toplevel, args, n);
+
+        n = 0;
+        form = XtCreateManagedWidget("form", formWidgetClass, dialog_shell, args, n);
+
+        /* Title label */
+        n = 0;
+        XtSetArg(args[n], XtNlabel, msg); n++;
+        XtSetArg(args[n], XtNborderWidth, 0); n++;
+        label = XtCreateManagedWidget("label", labelWidgetClass, form, args, n);
+
+        /* Text input section */
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, label); n++;
+        XtSetArg(args[n], XtNlabel, "Type timestep:"); n++;
+        XtSetArg(args[n], XtNborderWidth, 0); n++;
+        text_label = XtCreateManagedWidget("textLabel", labelWidgetClass, form, args, n);
+
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, text_label); n++;
+        XtSetArg(args[n], XtNwidth, 100); n++;
+        XtSetArg(args[n], XtNeditType, XawtextEdit); n++;
+        XtSetArg(args[n], XtNstring, ""); n++;
+        text_widget = XtCreateManagedWidget("textInput", asciiTextWidgetClass, form, args, n);
+
+        /* Create data structure to pass to callback */
+        TimeJumpDialogData *jump_data = malloc(sizeof(TimeJumpDialogData));
+        jump_data->text_widget = text_widget;
+        jump_data->dialog_shell = dialog_shell;
+
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, text_label); n++;
+        XtSetArg(args[n], XtNfromHoriz, text_widget); n++;
+        XtSetArg(args[n], XtNlabel, "Go"); n++;
+        button = XtCreateManagedWidget("goButton", commandWidgetClass, form, args, n);
+        XtAddCallback(button, XtNcallback, time_jump_to_typed_callback, (XtPointer)jump_data);
+
+        /* Or quick jump label */
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, text_widget); n++;
+        XtSetArg(args[n], XtNlabel, "Or quick jump:"); n++;
+        XtSetArg(args[n], XtNborderWidth, 0); n++;
+        label = XtCreateManagedWidget("orLabel", labelWidgetClass, form, args, n);
+
+        /* Quick jump buttons */
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, label); n++;
+        XtSetArg(args[n], XtNlabel, "First (1)"); n++;
+        button = XtCreateManagedWidget("first", commandWidgetClass, form, args, n);
+        XtAddCallback(button, XtNcallback, time_jump_to_callback, (XtPointer)0);
+
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, button); n++;
+        XtSetArg(args[n], XtNlabel, "1/4"); n++;
+        button = XtCreateManagedWidget("quarter", commandWidgetClass, form, args, n);
+        XtAddCallback(button, XtNcallback, time_jump_to_callback, (XtPointer)3);
+
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, button); n++;
+        XtSetArg(args[n], XtNlabel, "Middle"); n++;
+        button = XtCreateManagedWidget("middle", commandWidgetClass, form, args, n);
+        XtAddCallback(button, XtNcallback, time_jump_to_callback, (XtPointer)2);
+
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, button); n++;
+        XtSetArg(args[n], XtNlabel, "3/4"); n++;
+        button = XtCreateManagedWidget("threequarter", commandWidgetClass, form, args, n);
+        XtAddCallback(button, XtNcallback, time_jump_to_callback, (XtPointer)4);
+
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, button); n++;
+        snprintf(msg, sizeof(msg), "Last (%d)", n_timesteps);
+        XtSetArg(args[n], XtNlabel, msg); n++;
+        button = XtCreateManagedWidget("last", commandWidgetClass, form, args, n);
+        XtAddCallback(button, XtNcallback, time_jump_to_callback, (XtPointer)1);
+
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, button); n++;
+        XtSetArg(args[n], XtNlabel, "Close"); n++;
+        button = XtCreateManagedWidget("close", commandWidgetClass, form, args, n);
+        XtAddCallback(button, XtNcallback, time_jump_dialog_close_callback, (XtPointer)dialog_shell);
+
+        XtRealizeWidget(dialog_shell);
+        XtPopup(dialog_shell, XtGrabExclusive);
+
+        /* Set keyboard focus to text input */
+        XtSetKeyboardFocus(dialog_shell, text_widget);
+        XSync(display, False);
+        Time time = CurrentTime;
+        XtCallAcceptFocus(text_widget, &time);
+    }
+}
+
+/* Time Series button callback */
+void time_series_button_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    if (global_pf && global_pf->data && n_timesteps > 1) {
+        show_time_series(global_pf);
     }
 }
 
@@ -959,32 +1141,7 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
     button = XtCreateManagedWidget("profile", commandWidgetClass, nav_box, args, n);
     XtAddCallback(button, XtNcallback, profile_button_callback, NULL);
 
-    /* Time navigation (only if multiple timesteps) */
-    if (n_timesteps > 1) {
-        /* Time label */
-        n = 0;
-        XtSetArg(args[n], XtNlabel, "Time"); n++;
-        XtSetArg(args[n], XtNborderWidth, 0); n++;
-        XtCreateManagedWidget("timeText", labelWidgetClass, nav_box, args, n);
-
-        /* Time navigation buttons (</>)  */
-        const char *time_labels[] = {"<", ">"};
-        for (i = 0; i < 2; i++) {
-            n = 0;
-            XtSetArg(args[n], XtNlabel, time_labels[i]); n++;
-            button = XtCreateManagedWidget(time_labels[i], commandWidgetClass, nav_box, args, n);
-            XtAddCallback(button, XtNcallback, time_nav_button_callback, (XtPointer)(long)i);
-        }
-
-        /* Time index display label */
-        n = 0;
-        XtSetArg(args[n], XtNlabel, "1/1"); n++;
-        XtSetArg(args[n], XtNwidth, 60); n++;
-        XtSetArg(args[n], XtNborderWidth, 1); n++;
-        time_label = XtCreateManagedWidget("timeLabel", labelWidgetClass, nav_box, args, n);
-    }
-
-    /* COLUMN 2: Tools box (Colormap, Range, Distrib) */
+    /* COLUMN 2: Tools box (Colormap, Range, Distrib, and Time controls) */
     Widget tools_box;
     n = 0;
     XtSetArg(args[n], XtNfromVert, canvas_widget); n++;
@@ -1012,6 +1169,43 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
     XtSetArg(args[n], XtNlabel, "Distrib"); n++;
     button = XtCreateManagedWidget("distribution", commandWidgetClass, tools_box, args, n);
     XtAddCallback(button, XtNcallback, distribution_button_callback, NULL);
+
+    /* Time navigation (only if multiple timesteps) */
+    if (n_timesteps > 1) {
+        /* Time label */
+        n = 0;
+        XtSetArg(args[n], XtNlabel, "Time"); n++;
+        XtSetArg(args[n], XtNborderWidth, 0); n++;
+        XtCreateManagedWidget("timeText", labelWidgetClass, tools_box, args, n);
+
+        /* Time navigation buttons (</>)  */
+        const char *time_labels[] = {"<", ">"};
+        for (i = 0; i < 2; i++) {
+            n = 0;
+            XtSetArg(args[n], XtNlabel, time_labels[i]); n++;
+            button = XtCreateManagedWidget(time_labels[i], commandWidgetClass, tools_box, args, n);
+            XtAddCallback(button, XtNcallback, time_nav_button_callback, (XtPointer)(long)i);
+        }
+
+        /* Time index display label */
+        n = 0;
+        XtSetArg(args[n], XtNlabel, "1/1"); n++;
+        XtSetArg(args[n], XtNwidth, 60); n++;
+        XtSetArg(args[n], XtNborderWidth, 1); n++;
+        time_label = XtCreateManagedWidget("timeLabel", labelWidgetClass, tools_box, args, n);
+
+        /* Time Jump button */
+        n = 0;
+        XtSetArg(args[n], XtNlabel, "Jump"); n++;
+        button = XtCreateManagedWidget("timeJump", commandWidgetClass, tools_box, args, n);
+        XtAddCallback(button, XtNcallback, time_jump_button_callback, NULL);
+
+        /* Time Series button */
+        n = 0;
+        XtSetArg(args[n], XtNlabel, "Series"); n++;
+        button = XtCreateManagedWidget("timeSeries", commandWidgetClass, tools_box, args, n);
+        XtAddCallback(button, XtNcallback, time_series_button_callback, NULL);
+    }
 
     /* COLUMN 3: Level buttons (only if multiple levels exist) */
     if (pf->n_levels > 1) {
@@ -2318,7 +2512,7 @@ typedef struct {
     Widget shell;
     PlotData *mean_plot;
     PlotData *std_plot;
-    PlotData *kurtosis_plot;
+    PlotData *skewness_plot;
 } ProfilePopupData;
 
 /* Callback to destroy profile popup and free data */
@@ -2336,10 +2530,10 @@ void close_profile_popup_callback(Widget w, XtPointer client_data, XtPointer cal
             /* Note: std_plot->x_values is shared with mean_plot, already freed */
             free(popup_data->std_plot);
         }
-        if (popup_data->kurtosis_plot) {
-            if (popup_data->kurtosis_plot->data) free(popup_data->kurtosis_plot->data);
-            /* Note: kurtosis_plot->x_values is shared with mean_plot, already freed */
-            free(popup_data->kurtosis_plot);
+        if (popup_data->skewness_plot) {
+            if (popup_data->skewness_plot->data) free(popup_data->skewness_plot->data);
+            /* Note: skewness_plot->x_values is shared with mean_plot, already freed */
+            free(popup_data->skewness_plot);
         }
         XtDestroyWidget(popup_data->shell);
         free(popup_data);
@@ -2366,13 +2560,13 @@ void show_slice_statistics(PlotfileData *pf) {
     }
     int slice_size = slice_dim1 * slice_dim2;
 
-    /* Allocate arrays for mean, std, and kurtosis */
+    /* Allocate arrays for mean, std, and skewness */
     double *means = (double *)malloc(n_slices * sizeof(double));
     double *stds = (double *)malloc(n_slices * sizeof(double));
-    double *kurtosis = (double *)malloc(n_slices * sizeof(double));
+    double *skewness = (double *)malloc(n_slices * sizeof(double));
     double *layer_indices = (double *)malloc(n_slices * sizeof(double));
 
-    /* Calculate mean, std, and kurtosis for each slice */
+    /* Calculate mean, std, and skewness for each slice */
     for (int s = 0; s < n_slices; s++) {
         layer_indices[s] = s + 1;  /* 1-indexed for display */
 
@@ -2400,8 +2594,8 @@ void show_slice_statistics(PlotfileData *pf) {
         double variance = (sum_sq / slice_size) - (means[s] * means[s]);
         stds[s] = (variance > 0) ? sqrt(variance) : 0.0;
 
-        /* Second pass: calculate kurtosis (fourth moment) */
-        double sum_fourth = 0.0;
+        /* Second pass: calculate skewness (third moment) */
+        double sum_third = 0.0;
         for (int j = 0; j < slice_dim2; j++) {
             for (int i = 0; i < slice_dim1; i++) {
                 int idx;
@@ -2414,16 +2608,16 @@ void show_slice_statistics(PlotfileData *pf) {
                 }
                 double val = pf->data[idx];
                 double diff = val - means[s];
-                sum_fourth += diff * diff * diff * diff;
+                sum_third += diff * diff * diff;
             }
         }
 
-        /* Excess kurtosis: kurtosis - 3 (normal distribution has kurtosis = 3) */
+        /* Skewness = E[(X - mu)^3] / sigma^3 */
         if (stds[s] > 0) {
-            double std4 = stds[s] * stds[s] * stds[s] * stds[s];
-            kurtosis[s] = (sum_fourth / slice_size) / std4 - 3.0;
+            double std3 = stds[s] * stds[s] * stds[s];
+            skewness[s] = (sum_third / slice_size) / std3;
         } else {
-            kurtosis[s] = 0.0;
+            skewness[s] = 0.0;
         }
     }
 
@@ -2464,29 +2658,29 @@ void show_slice_statistics(PlotfileData *pf) {
     snprintf(std_plot->xlabel, sizeof(std_plot->xlabel), "%s Layer", axis_names[axis]);
     snprintf(std_plot->vlabel, sizeof(std_plot->vlabel), "%s Std", pf->variables[pf->current_var]);
 
-    /* Create plot data for kurtosis */
-    PlotData *kurtosis_plot = (PlotData *)malloc(sizeof(PlotData));
-    kurtosis_plot->n_points = n_slices;
-    kurtosis_plot->data = kurtosis;
-    kurtosis_plot->x_values = layer_indices;  /* Share with mean, will be freed once */
-    kurtosis_plot->vmin = 1e30;
-    kurtosis_plot->vmax = -1e30;
+    /* Create plot data for skewness */
+    PlotData *skewness_plot = (PlotData *)malloc(sizeof(PlotData));
+    skewness_plot->n_points = n_slices;
+    skewness_plot->data = skewness;
+    skewness_plot->x_values = layer_indices;  /* Share with mean, will be freed once */
+    skewness_plot->vmin = 1e30;
+    skewness_plot->vmax = -1e30;
     for (int i = 0; i < n_slices; i++) {
-        if (kurtosis[i] < kurtosis_plot->vmin) kurtosis_plot->vmin = kurtosis[i];
-        if (kurtosis[i] > kurtosis_plot->vmax) kurtosis_plot->vmax = kurtosis[i];
+        if (skewness[i] < skewness_plot->vmin) skewness_plot->vmin = skewness[i];
+        if (skewness[i] > skewness_plot->vmax) skewness_plot->vmax = skewness[i];
     }
-    kurtosis_plot->xmin = 1;
-    kurtosis_plot->xmax = n_slices;
-    snprintf(kurtosis_plot->title, sizeof(kurtosis_plot->title), "%s Kurtosis along %s axis",
+    skewness_plot->xmin = 1;
+    skewness_plot->xmax = n_slices;
+    snprintf(skewness_plot->title, sizeof(skewness_plot->title), "%s Skewness along %s axis",
              pf->variables[pf->current_var], axis_names[axis]);
-    snprintf(kurtosis_plot->xlabel, sizeof(kurtosis_plot->xlabel), "%s Layer", axis_names[axis]);
-    snprintf(kurtosis_plot->vlabel, sizeof(kurtosis_plot->vlabel), "%s Kurtosis", pf->variables[pf->current_var]);
+    snprintf(skewness_plot->xlabel, sizeof(skewness_plot->xlabel), "%s Layer", axis_names[axis]);
+    snprintf(skewness_plot->vlabel, sizeof(skewness_plot->vlabel), "%s Skewness", pf->variables[pf->current_var]);
 
     /* Create popup data structure */
     ProfilePopupData *popup_data = (ProfilePopupData *)malloc(sizeof(ProfilePopupData));
     popup_data->mean_plot = mean_plot;
     popup_data->std_plot = std_plot;
-    popup_data->kurtosis_plot = kurtosis_plot;
+    popup_data->skewness_plot = skewness_plot;
 
     /* Create popup shell - wider for 3 side-by-side plots */
     Widget popup_shell = XtVaCreatePopupShell("Slice Statistics",
@@ -2519,7 +2713,7 @@ void show_slice_statistics(PlotfileData *pf) {
         NULL);
 
     /* Kurtosis plot canvas - right (next to std) */
-    Widget kurtosis_canvas = XtVaCreateManagedWidget("kurtosis_plot",
+    Widget skewness_canvas = XtVaCreateManagedWidget("skewness_plot",
         simpleWidgetClass, popup_form,
         XtNfromHoriz, std_canvas,
         XtNwidth, 380,
@@ -2530,7 +2724,7 @@ void show_slice_statistics(PlotfileData *pf) {
     /* Add expose event handlers - using horizontal plot (layer on Y, value on X) */
     XtAddEventHandler(mean_canvas, ExposureMask, False, horizontal_plot_expose_handler, mean_plot);
     XtAddEventHandler(std_canvas, ExposureMask, False, horizontal_plot_expose_handler, std_plot);
-    XtAddEventHandler(kurtosis_canvas, ExposureMask, False, horizontal_plot_expose_handler, kurtosis_plot);
+    XtAddEventHandler(skewness_canvas, ExposureMask, False, horizontal_plot_expose_handler, skewness_plot);
 
     /* Close button - below the plots */
     Widget close_button = XtVaCreateManagedWidget("Close",
@@ -2575,7 +2769,7 @@ void close_distribution_popup_callback(Widget w, XtPointer client_data, XtPointe
 void draw_histogram(Display *dpy, Window win, GC plot_gc, double *bin_counts, double *bin_centers,
                     int n_bins, int width, int height, double count_max,
                     double bin_min, double bin_max, const char *title, const char *xlabel,
-                    double mean, double std, double kurtosis) {
+                    double mean, double std, double skewness) {
     /* Clear background */
     XSetForeground(dpy, plot_gc, WhitePixel(dpy, screen));
     XFillRectangle(dpy, win, plot_gc, 0, 0, width, height);
@@ -2654,7 +2848,7 @@ void draw_histogram(Display *dpy, Window win, GC plot_gc, double *bin_counts, do
     /* Draw statistics text */
     XSetForeground(dpy, plot_gc, BlackPixel(dpy, screen));
     char stats[256];
-    snprintf(stats, sizeof(stats), "Mean: %.4e   Std: %.4e   Kurtosis: %.4f", mean, std, kurtosis);
+    snprintf(stats, sizeof(stats), "Mean: %.4e   Std: %.4e   Skewness: %.4f", mean, std, skewness);
     XDrawString(dpy, win, plot_gc, plot_left, plot_bottom + 55, stats, strlen(stats));
 
     XFlush(dpy);
@@ -2669,7 +2863,7 @@ typedef struct {
     double bin_min, bin_max;
     char title[128];
     char xlabel[64];
-    double mean, std, kurtosis;
+    double mean, std, skewness;
 } HistogramData;
 
 /* Expose event handler for histogram canvas */
@@ -2689,7 +2883,7 @@ void histogram_expose_handler(Widget w, XtPointer client_data, XEvent *event, Bo
     draw_histogram(display, win, plot_gc, hist_data->bin_counts, hist_data->bin_centers,
                    hist_data->n_bins, width, height, hist_data->count_max,
                    hist_data->bin_min, hist_data->bin_max, hist_data->title, hist_data->xlabel,
-                   hist_data->mean, hist_data->std, hist_data->kurtosis);
+                   hist_data->mean, hist_data->std, hist_data->skewness);
     XFreeGC(display, plot_gc);
 }
 
@@ -2759,16 +2953,16 @@ void show_distribution(PlotfileData *pf) {
     double variance = (sum_sq / slice_size) - (mean * mean);
     double std = (variance > 0) ? sqrt(variance) : 0.0;
 
-    /* Calculate kurtosis (second pass) */
-    double sum_fourth = 0.0;
+    /* Calculate skewness (second pass) */
+    double sum_third = 0.0;
     for (int i = 0; i < slice_size; i++) {
         double diff = slice_data[i] - mean;
-        sum_fourth += diff * diff * diff * diff;
+        sum_third += diff * diff * diff;
     }
-    double kurtosis = 0.0;
+    double skewness = 0.0;
     if (std > 0) {
-        double std4 = std * std * std * std;
-        kurtosis = (sum_fourth / slice_size) / std4 - 3.0;
+        double std3 = std * std * std;
+        skewness = (sum_third / slice_size) / std3;
     }
 
     /* Determine number of bins using Sturges' rule */
@@ -2813,7 +3007,7 @@ void show_distribution(PlotfileData *pf) {
     hist_data->bin_max = data_max;
     hist_data->mean = mean;
     hist_data->std = std;
-    hist_data->kurtosis = kurtosis;
+    hist_data->skewness = skewness;
     snprintf(hist_data->title, sizeof(hist_data->title), "%s Distribution at %s Layer %d",
              pf->variables[pf->current_var], axis_names[axis], slice_idx + 1);
     snprintf(hist_data->xlabel, sizeof(hist_data->xlabel), "%s", pf->variables[pf->current_var]);
@@ -2857,6 +3051,267 @@ void distribution_button_callback(Widget w, XtPointer client_data, XtPointer cal
     if (global_pf && global_pf->data) {
         show_distribution(global_pf);
     }
+}
+
+/* Popup data for time series (3 plots) */
+typedef struct {
+    Widget shell;
+    PlotData *mean_plot;
+    PlotData *std_plot;
+    PlotData *skewness_plot;
+} TimeSeriesPopupData;
+
+/* Callback to destroy time series popup and free data */
+void close_time_series_popup_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    TimeSeriesPopupData *popup_data = (TimeSeriesPopupData *)client_data;
+
+    if (popup_data) {
+        if (popup_data->mean_plot) {
+            if (popup_data->mean_plot->data) free(popup_data->mean_plot->data);
+            if (popup_data->mean_plot->x_values) free(popup_data->mean_plot->x_values);
+            free(popup_data->mean_plot);
+        }
+        if (popup_data->std_plot) {
+            if (popup_data->std_plot->data) free(popup_data->std_plot->data);
+            /* Note: std_plot->x_values is shared with mean_plot, already freed */
+            free(popup_data->std_plot);
+        }
+        if (popup_data->skewness_plot) {
+            if (popup_data->skewness_plot->data) free(popup_data->skewness_plot->data);
+            /* Note: skewness_plot->x_values is shared with mean_plot, already freed */
+            free(popup_data->skewness_plot);
+        }
+        XtDestroyWidget(popup_data->shell);
+        free(popup_data);
+    }
+}
+
+/* Show time series statistics (mean, std, skewness) for the current slice across all timesteps */
+void show_time_series(PlotfileData *pf) {
+    if (n_timesteps <= 1) return;
+
+    const char *axis_names[] = {"X", "Y", "Z"};
+    int axis = pf->slice_axis;
+    int slice_idx = pf->slice_idx;
+    int current_var = pf->current_var;
+
+    /* Save current state */
+    int original_timestep = current_timestep;
+    char original_dir[MAX_PATH];
+    strncpy(original_dir, pf->plotfile_dir, MAX_PATH - 1);
+
+    /* Determine slice dimensions */
+    int slice_dim1, slice_dim2;
+    if (axis == 2) {
+        slice_dim1 = pf->grid_dims[0];
+        slice_dim2 = pf->grid_dims[1];
+    } else if (axis == 1) {
+        slice_dim1 = pf->grid_dims[0];
+        slice_dim2 = pf->grid_dims[2];
+    } else {
+        slice_dim1 = pf->grid_dims[1];
+        slice_dim2 = pf->grid_dims[2];
+    }
+    int slice_size = slice_dim1 * slice_dim2;
+
+    /* Allocate arrays for time series statistics */
+    double *means = (double *)malloc(n_timesteps * sizeof(double));
+    double *stds = (double *)malloc(n_timesteps * sizeof(double));
+    double *skewness = (double *)malloc(n_timesteps * sizeof(double));
+    double *time_indices = (double *)malloc(n_timesteps * sizeof(double));
+
+    printf("Computing time series statistics for %d timesteps...\n", n_timesteps);
+
+    /* Loop through all timesteps */
+    for (int t = 0; t < n_timesteps; t++) {
+        time_indices[t] = t + 1;  /* 1-indexed for display */
+
+        /* Load this timestep's data */
+        strncpy(pf->plotfile_dir, timestep_paths[t], MAX_PATH - 1);
+        read_header(pf);
+        pf->n_boxes = 0;
+        read_cell_h(pf);
+        read_variable_data(pf, current_var);
+
+        /* Calculate statistics for the slice */
+        double sum = 0.0, sum_sq = 0.0;
+
+        for (int j = 0; j < slice_dim2; j++) {
+            for (int i = 0; i < slice_dim1; i++) {
+                int idx;
+                if (axis == 2) {
+                    idx = slice_idx * pf->grid_dims[0] * pf->grid_dims[1] + j * pf->grid_dims[0] + i;
+                } else if (axis == 1) {
+                    idx = j * pf->grid_dims[0] * pf->grid_dims[1] + slice_idx * pf->grid_dims[0] + i;
+                } else {
+                    idx = j * pf->grid_dims[0] * pf->grid_dims[1] + i * pf->grid_dims[0] + slice_idx;
+                }
+                double val = pf->data[idx];
+                sum += val;
+                sum_sq += val * val;
+            }
+        }
+
+        means[t] = sum / slice_size;
+        double variance = (sum_sq / slice_size) - (means[t] * means[t]);
+        stds[t] = (variance > 0) ? sqrt(variance) : 0.0;
+
+        /* Second pass: calculate skewness (third moment) */
+        double sum_third = 0.0;
+        for (int j = 0; j < slice_dim2; j++) {
+            for (int i = 0; i < slice_dim1; i++) {
+                int idx;
+                if (axis == 2) {
+                    idx = slice_idx * pf->grid_dims[0] * pf->grid_dims[1] + j * pf->grid_dims[0] + i;
+                } else if (axis == 1) {
+                    idx = j * pf->grid_dims[0] * pf->grid_dims[1] + slice_idx * pf->grid_dims[0] + i;
+                } else {
+                    idx = j * pf->grid_dims[0] * pf->grid_dims[1] + i * pf->grid_dims[0] + slice_idx;
+                }
+                double val = pf->data[idx];
+                double diff = val - means[t];
+                sum_third += diff * diff * diff;
+            }
+        }
+
+        /* Skewness = E[(X - mu)^3] / sigma^3 */
+        if (stds[t] > 0) {
+            double std3 = stds[t] * stds[t] * stds[t];
+            skewness[t] = (sum_third / slice_size) / std3;
+        } else {
+            skewness[t] = 0.0;
+        }
+
+        if ((t + 1) % 10 == 0 || t == n_timesteps - 1) {
+            printf("  Processed %d/%d timesteps\n", t + 1, n_timesteps);
+        }
+    }
+
+    /* Restore original state */
+    strncpy(pf->plotfile_dir, original_dir, MAX_PATH - 1);
+    current_timestep = original_timestep;
+    read_header(pf);
+    pf->n_boxes = 0;
+    read_cell_h(pf);
+    read_variable_data(pf, current_var);
+
+    /* Create plot data for mean */
+    PlotData *mean_plot = (PlotData *)malloc(sizeof(PlotData));
+    mean_plot->n_points = n_timesteps;
+    mean_plot->data = means;
+    mean_plot->x_values = (double *)malloc(n_timesteps * sizeof(double));
+    memcpy(mean_plot->x_values, time_indices, n_timesteps * sizeof(double));
+    mean_plot->vmin = 1e30;
+    mean_plot->vmax = -1e30;
+    for (int i = 0; i < n_timesteps; i++) {
+        if (means[i] < mean_plot->vmin) mean_plot->vmin = means[i];
+        if (means[i] > mean_plot->vmax) mean_plot->vmax = means[i];
+    }
+    mean_plot->xmin = 1;
+    mean_plot->xmax = n_timesteps;
+    snprintf(mean_plot->title, sizeof(mean_plot->title), "%s Mean (%s Layer %d)",
+             pf->variables[pf->current_var], axis_names[axis], slice_idx + 1);
+    snprintf(mean_plot->xlabel, sizeof(mean_plot->xlabel), "Timestep");
+    snprintf(mean_plot->vlabel, sizeof(mean_plot->vlabel), "Mean");
+
+    /* Create plot data for std */
+    PlotData *std_plot = (PlotData *)malloc(sizeof(PlotData));
+    std_plot->n_points = n_timesteps;
+    std_plot->data = stds;
+    std_plot->x_values = time_indices;  /* Share with mean, will be freed once */
+    std_plot->vmin = 1e30;
+    std_plot->vmax = -1e30;
+    for (int i = 0; i < n_timesteps; i++) {
+        if (stds[i] < std_plot->vmin) std_plot->vmin = stds[i];
+        if (stds[i] > std_plot->vmax) std_plot->vmax = stds[i];
+    }
+    std_plot->xmin = 1;
+    std_plot->xmax = n_timesteps;
+    snprintf(std_plot->title, sizeof(std_plot->title), "%s Std Dev (%s Layer %d)",
+             pf->variables[pf->current_var], axis_names[axis], slice_idx + 1);
+    snprintf(std_plot->xlabel, sizeof(std_plot->xlabel), "Timestep");
+    snprintf(std_plot->vlabel, sizeof(std_plot->vlabel), "Std Dev");
+
+    /* Create plot data for skewness */
+    PlotData *skewness_plot = (PlotData *)malloc(sizeof(PlotData));
+    skewness_plot->n_points = n_timesteps;
+    skewness_plot->data = skewness;
+    skewness_plot->x_values = time_indices;  /* Share with mean, will be freed once */
+    skewness_plot->vmin = 1e30;
+    skewness_plot->vmax = -1e30;
+    for (int i = 0; i < n_timesteps; i++) {
+        if (skewness[i] < skewness_plot->vmin) skewness_plot->vmin = skewness[i];
+        if (skewness[i] > skewness_plot->vmax) skewness_plot->vmax = skewness[i];
+    }
+    skewness_plot->xmin = 1;
+    skewness_plot->xmax = n_timesteps;
+    snprintf(skewness_plot->title, sizeof(skewness_plot->title), "%s Skewness (%s Layer %d)",
+             pf->variables[pf->current_var], axis_names[axis], slice_idx + 1);
+    snprintf(skewness_plot->xlabel, sizeof(skewness_plot->xlabel), "Timestep");
+    snprintf(skewness_plot->vlabel, sizeof(skewness_plot->vlabel), "Skewness");
+
+    /* Create popup data structure */
+    TimeSeriesPopupData *popup_data = (TimeSeriesPopupData *)malloc(sizeof(TimeSeriesPopupData));
+    popup_data->mean_plot = mean_plot;
+    popup_data->std_plot = std_plot;
+    popup_data->skewness_plot = skewness_plot;
+
+    /* Create popup shell - wider for 3 side-by-side plots */
+    Widget popup_shell = XtVaCreatePopupShell("Time Series Statistics",
+        transientShellWidgetClass, toplevel,
+        XtNwidth, 1200,
+        XtNheight, 450,
+        NULL);
+
+    popup_data->shell = popup_shell;
+
+    Widget popup_form = XtVaCreateManagedWidget("form",
+        formWidgetClass, popup_shell,
+        NULL);
+
+    /* Mean plot canvas - left */
+    Widget mean_canvas = XtVaCreateManagedWidget("mean_plot",
+        simpleWidgetClass, popup_form,
+        XtNwidth, 380,
+        XtNheight, 350,
+        XtNborderWidth, 1,
+        NULL);
+
+    /* Std plot canvas - middle */
+    Widget std_canvas = XtVaCreateManagedWidget("std_plot",
+        simpleWidgetClass, popup_form,
+        XtNfromHoriz, mean_canvas,
+        XtNwidth, 380,
+        XtNheight, 350,
+        XtNborderWidth, 1,
+        NULL);
+
+    /* Skewness plot canvas - right */
+    Widget skewness_canvas = XtVaCreateManagedWidget("skewness_plot",
+        simpleWidgetClass, popup_form,
+        XtNfromHoriz, std_canvas,
+        XtNwidth, 380,
+        XtNheight, 350,
+        XtNborderWidth, 1,
+        NULL);
+
+    /* Add expose event handlers - using horizontal plot (timestep on Y, value on X) */
+    XtAddEventHandler(mean_canvas, ExposureMask, False, horizontal_plot_expose_handler, mean_plot);
+    XtAddEventHandler(std_canvas, ExposureMask, False, horizontal_plot_expose_handler, std_plot);
+    XtAddEventHandler(skewness_canvas, ExposureMask, False, horizontal_plot_expose_handler, skewness_plot);
+
+    /* Close button */
+    Widget close_button = XtVaCreateManagedWidget("Close",
+        commandWidgetClass, popup_form,
+        XtNfromVert, mean_canvas,
+        NULL);
+
+    XtAddCallback(close_button, XtNcallback, close_time_series_popup_callback, popup_data);
+
+    /* Show popup */
+    XtPopup(popup_shell, XtGrabNone);
+
+    printf("Time series statistics displayed.\n");
 }
 
 void cleanup(PlotfileData *pf) {
