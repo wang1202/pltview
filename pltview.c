@@ -83,7 +83,7 @@ typedef struct {
 /* X11 globals */
 Display *display;
 Widget toplevel, form, canvas_widget, var_box, info_label;
-Widget axis_box, cmap_box, nav_box, colorbar_widget, layer_label;
+Widget axis_box, nav_box, colorbar_widget, layer_label;
 Window canvas, colorbar;
 GC gc, text_gc, colorbar_gc;
 XImage *ximage;
@@ -129,6 +129,7 @@ RGB magma_colormap(double t);
 RGB get_colormap_rgb(double t, int cmap_type);
 void draw_colorbar(double vmin, double vmax, int cmap_type);
 void cmap_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
+void colormap_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void colorbar_expose_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void init_gui(PlotfileData *pf, int argc, char **argv);
 void render_slice(PlotfileData *pf);
@@ -781,37 +782,52 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
     button = XtCreateManagedWidget("jump", commandWidgetClass, nav_box, args, n);
     XtAddCallback(button, XtNcallback, jump_button_callback, NULL);
 
-    /* Range button for custom colorbar min/max */
-    n = 0;
-    XtSetArg(args[n], XtNlabel, "Range"); n++;
-    button = XtCreateManagedWidget("range", commandWidgetClass, nav_box, args, n);
-    XtAddCallback(button, XtNcallback, range_button_callback, NULL);
-
     /* Profile button for slice statistics */
     n = 0;
     XtSetArg(args[n], XtNlabel, "Profile"); n++;
     button = XtCreateManagedWidget("profile", commandWidgetClass, nav_box, args, n);
     XtAddCallback(button, XtNcallback, profile_button_callback, NULL);
 
+    /* COLUMN 2: Tools box (Colormap, Range, Distrib) */
+    Widget tools_box;
+    n = 0;
+    XtSetArg(args[n], XtNfromVert, canvas_widget); n++;
+    XtSetArg(args[n], XtNfromHoriz, nav_box); n++;
+    XtSetArg(args[n], XtNborderWidth, 1); n++;
+    XtSetArg(args[n], XtNorientation, XtorientHorizontal); n++;
+    XtSetArg(args[n], XtNbottom, XawChainBottom); n++;
+    XtSetArg(args[n], XtNleft, XawChainLeft); n++;
+    tools_box = XtCreateManagedWidget("toolsBox", boxWidgetClass, form, args, n);
+
+    /* Colormap button - opens popup with colormap options */
+    n = 0;
+    XtSetArg(args[n], XtNlabel, "Colormap"); n++;
+    button = XtCreateManagedWidget("colormap", commandWidgetClass, tools_box, args, n);
+    XtAddCallback(button, XtNcallback, colormap_button_callback, NULL);
+
+    /* Range button for custom colorbar min/max */
+    n = 0;
+    XtSetArg(args[n], XtNlabel, "Range"); n++;
+    button = XtCreateManagedWidget("range", commandWidgetClass, tools_box, args, n);
+    XtAddCallback(button, XtNcallback, range_button_callback, NULL);
+
     /* Distribution button for current layer histogram */
     n = 0;
     XtSetArg(args[n], XtNlabel, "Distrib"); n++;
-    button = XtCreateManagedWidget("distribution", commandWidgetClass, nav_box, args, n);
+    button = XtCreateManagedWidget("distribution", commandWidgetClass, tools_box, args, n);
     XtAddCallback(button, XtNcallback, distribution_button_callback, NULL);
 
-    /* COLUMN 2: Level and Colormap buttons */
-    /* Level buttons box (only if multiple levels exist) */
-    Widget level_box = NULL;
+    /* COLUMN 3: Level buttons (only if multiple levels exist) */
     if (pf->n_levels > 1) {
         n = 0;
         XtSetArg(args[n], XtNfromVert, canvas_widget); n++;
-        XtSetArg(args[n], XtNfromHoriz, nav_box); n++;
+        XtSetArg(args[n], XtNfromHoriz, tools_box); n++;
         XtSetArg(args[n], XtNborderWidth, 1); n++;
         XtSetArg(args[n], XtNorientation, XtorientHorizontal); n++;
         XtSetArg(args[n], XtNbottom, XawChainBottom); n++;
         XtSetArg(args[n], XtNleft, XawChainLeft); n++;
-        level_box = XtCreateManagedWidget("levelBox", boxWidgetClass, form, args, n);
-        
+        Widget level_box = XtCreateManagedWidget("levelBox", boxWidgetClass, form, args, n);
+
         /* Add level buttons (limit to 10 levels) */
         int max_levels = pf->n_levels < 10 ? pf->n_levels : 10;
         for (i = 0; i < max_levels; i++) {
@@ -821,29 +837,6 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
             button = XtCreateManagedWidget(label_text, commandWidgetClass, level_box, args, n);
             XtAddCallback(button, XtNcallback, level_button_callback, (XtPointer)(long)i);
         }
-    }
-    
-    /* Colormap buttons in Column 2 */
-    n = 0;
-    if (pf->n_levels > 1) {
-        XtSetArg(args[n], XtNfromVert, level_box); n++;
-        XtSetArg(args[n], XtNfromHoriz, nav_box); n++;
-    } else {
-        XtSetArg(args[n], XtNfromVert, canvas_widget); n++;
-        XtSetArg(args[n], XtNfromHoriz, nav_box); n++;
-    }
-    XtSetArg(args[n], XtNborderWidth, 1); n++;
-    XtSetArg(args[n], XtNorientation, XtorientHorizontal); n++;
-    XtSetArg(args[n], XtNbottom, XawChainBottom); n++;
-    XtSetArg(args[n], XtNleft, XawChainLeft); n++;
-    cmap_box = XtCreateManagedWidget("cmapBox", boxWidgetClass, form, args, n);
-    
-    const char *cmap_labels[] = {"viridis", "jet", "turbo", "plasma", "hot", "cool", "gray", "magma"};
-    for (i = 0; i < 8; i++) {
-        n = 0;
-        XtSetArg(args[n], XtNlabel, cmap_labels[i]); n++;
-        button = XtCreateManagedWidget(cmap_labels[i], commandWidgetClass, cmap_box, args, n);
-        XtAddCallback(button, XtNcallback, cmap_button_callback, (XtPointer)(long)i);
     }
     
     /* Colorbar widget */
@@ -1426,13 +1419,83 @@ void update_layer_label(PlotfileData *pf) {
     XtSetValues(layer_label, args, 1);
 }
 
-/* Colormap button callback */
+/* Colormap button callback (used in popup) */
 void cmap_button_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     int cmap = (int)(long)client_data;
     if (global_pf) {
         global_pf->colormap = cmap;
         render_slice(global_pf);
         draw_colorbar(current_vmin, current_vmax, cmap);
+    }
+}
+
+/* Close colormap dialog and apply selection */
+void cmap_select_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    int cmap = (int)(long)client_data;
+    if (global_pf) {
+        global_pf->colormap = cmap;
+        render_slice(global_pf);
+        draw_colorbar(current_vmin, current_vmax, cmap);
+    }
+
+    /* Close the dialog */
+    Widget shell = XtParent(XtParent(w));
+    XtPopdown(shell);
+    XtDestroyWidget(shell);
+}
+
+/* Close colormap dialog without changing */
+void cmap_dialog_close_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    Widget shell = (Widget)client_data;
+    XtPopdown(shell);
+    XtDestroyWidget(shell);
+}
+
+/* Colormap button callback - opens popup with colormap options */
+void colormap_button_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    if (global_pf) {
+        Arg args[10];
+        int n, i;
+        Widget dialog_shell, form, label, button;
+
+        n = 0;
+        XtSetArg(args[n], XtNtitle, "Select Colormap"); n++;
+        dialog_shell = XtCreatePopupShell("cmapDialog", transientShellWidgetClass, toplevel, args, n);
+
+        n = 0;
+        form = XtCreateManagedWidget("form", formWidgetClass, dialog_shell, args, n);
+
+        /* Title label */
+        n = 0;
+        XtSetArg(args[n], XtNlabel, "Choose colormap:"); n++;
+        XtSetArg(args[n], XtNborderWidth, 0); n++;
+        label = XtCreateManagedWidget("label", labelWidgetClass, form, args, n);
+
+        /* Colormap buttons with numbered labels */
+        const char *cmap_names[] = {"viridis", "jet", "turbo", "plasma", "hot", "cool", "gray", "magma"};
+        Widget prev_button = label;
+        char cmap_label[32];
+
+        for (i = 0; i < 8; i++) {
+            n = 0;
+            XtSetArg(args[n], XtNfromVert, prev_button); n++;
+            snprintf(cmap_label, sizeof(cmap_label), "%d. %s", i + 1, cmap_names[i]);
+            XtSetArg(args[n], XtNlabel, cmap_label); n++;
+            XtSetArg(args[n], XtNwidth, 100); n++;
+            button = XtCreateManagedWidget(cmap_names[i], commandWidgetClass, form, args, n);
+            XtAddCallback(button, XtNcallback, cmap_select_callback, (XtPointer)(long)i);
+            prev_button = button;
+        }
+
+        /* Close button */
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, prev_button); n++;
+        XtSetArg(args[n], XtNlabel, "Close"); n++;
+        button = XtCreateManagedWidget("close", commandWidgetClass, form, args, n);
+        XtAddCallback(button, XtNcallback, cmap_dialog_close_callback, (XtPointer)dialog_shell);
+
+        XtRealizeWidget(dialog_shell);
+        XtPopup(dialog_shell, XtGrabNone);
     }
 }
 
@@ -2737,9 +2800,9 @@ int main(int argc, char **argv) {
                     global_pf->slice_idx--;
                     changed = 1;
                 }
-            } else if (key >= XK_0 && key <= XK_3) {
-                /* Switch colormap with 0-3 keys */
-                global_pf->colormap = key - XK_0;
+            } else if (key >= XK_1 && key <= XK_8) {
+                /* Switch colormap with 1-8 keys */
+                global_pf->colormap = key - XK_1;
                 changed = 1;
             }
             
