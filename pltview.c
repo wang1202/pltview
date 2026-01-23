@@ -1077,29 +1077,10 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
     canvas_widget = XtCreateManagedWidget("canvas", simpleWidgetClass, form, args, n);
     XtAddCallback(canvas_widget, XtNcallback, canvas_expose_callback, NULL);
     
-    /* COLUMN 1: Axis and Navigation buttons */
-    /* Axis buttons box */
+    /* COLUMN 1: Navigation buttons */
+    /* Navigation buttons (+/-) in Column 1, Row 1 */
     n = 0;
     XtSetArg(args[n], XtNfromVert, canvas_widget); n++;
-    XtSetArg(args[n], XtNfromHoriz, var_box); n++;
-    XtSetArg(args[n], XtNborderWidth, 1); n++;
-    XtSetArg(args[n], XtNorientation, XtorientHorizontal); n++;
-    XtSetArg(args[n], XtNbottom, XawChainBottom); n++;
-    XtSetArg(args[n], XtNleft, XawChainLeft); n++;
-    axis_box = XtCreateManagedWidget("axisBox", boxWidgetClass, form, args, n);
-    
-    /* Axis buttons */
-    const char *axis_labels[] = {"X", "Y", "Z"};
-    for (i = 0; i < 3; i++) {
-        n = 0;
-        XtSetArg(args[n], XtNlabel, axis_labels[i]); n++;
-        button = XtCreateManagedWidget(axis_labels[i], commandWidgetClass, axis_box, args, n);
-        XtAddCallback(button, XtNcallback, axis_button_callback, (XtPointer)(long)i);
-    }
-    
-    /* Navigation buttons (+/-) in Column 1 */
-    n = 0;
-    XtSetArg(args[n], XtNfromVert, axis_box); n++;
     XtSetArg(args[n], XtNfromHoriz, var_box); n++;
     XtSetArg(args[n], XtNborderWidth, 1); n++;
     XtSetArg(args[n], XtNorientation, XtorientHorizontal); n++;
@@ -1141,10 +1122,29 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
     button = XtCreateManagedWidget("profile", commandWidgetClass, nav_box, args, n);
     XtAddCallback(button, XtNcallback, profile_button_callback, NULL);
 
-    /* COLUMN 2: Tools box (Colormap, Range, Distrib, and Time controls) */
-    Widget tools_box;
+    /* COLUMN 2, ROW 1: Axis buttons (X, Y, Z) */
     n = 0;
     XtSetArg(args[n], XtNfromVert, canvas_widget); n++;
+    XtSetArg(args[n], XtNfromHoriz, nav_box); n++;
+    XtSetArg(args[n], XtNborderWidth, 1); n++;
+    XtSetArg(args[n], XtNorientation, XtorientHorizontal); n++;
+    XtSetArg(args[n], XtNbottom, XawChainBottom); n++;
+    XtSetArg(args[n], XtNleft, XawChainLeft); n++;
+    axis_box = XtCreateManagedWidget("axisBox", boxWidgetClass, form, args, n);
+
+    /* Axis buttons */
+    const char *axis_labels[] = {"X", "Y", "Z"};
+    for (i = 0; i < 3; i++) {
+        n = 0;
+        XtSetArg(args[n], XtNlabel, axis_labels[i]); n++;
+        button = XtCreateManagedWidget(axis_labels[i], commandWidgetClass, axis_box, args, n);
+        XtAddCallback(button, XtNcallback, axis_button_callback, (XtPointer)(long)i);
+    }
+
+    /* COLUMN 2, ROW 2: Tools box (Colormap, Range, Distrib) */
+    Widget tools_box;
+    n = 0;
+    XtSetArg(args[n], XtNfromVert, axis_box); n++;
     XtSetArg(args[n], XtNfromHoriz, nav_box); n++;
     XtSetArg(args[n], XtNborderWidth, 1); n++;
     XtSetArg(args[n], XtNorientation, XtorientHorizontal); n++;
@@ -1170,48 +1170,11 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
     button = XtCreateManagedWidget("distribution", commandWidgetClass, tools_box, args, n);
     XtAddCallback(button, XtNcallback, distribution_button_callback, NULL);
 
-    /* Time navigation (only if multiple timesteps) */
-    if (n_timesteps > 1) {
-        /* Time label */
-        n = 0;
-        XtSetArg(args[n], XtNlabel, "Time"); n++;
-        XtSetArg(args[n], XtNborderWidth, 0); n++;
-        XtCreateManagedWidget("timeText", labelWidgetClass, tools_box, args, n);
-
-        /* Time navigation buttons (</>)  */
-        const char *time_labels[] = {"<", ">"};
-        for (i = 0; i < 2; i++) {
-            n = 0;
-            XtSetArg(args[n], XtNlabel, time_labels[i]); n++;
-            button = XtCreateManagedWidget(time_labels[i], commandWidgetClass, tools_box, args, n);
-            XtAddCallback(button, XtNcallback, time_nav_button_callback, (XtPointer)(long)i);
-        }
-
-        /* Time index display label */
-        n = 0;
-        XtSetArg(args[n], XtNlabel, "1/1"); n++;
-        XtSetArg(args[n], XtNwidth, 60); n++;
-        XtSetArg(args[n], XtNborderWidth, 1); n++;
-        time_label = XtCreateManagedWidget("timeLabel", labelWidgetClass, tools_box, args, n);
-
-        /* Time Jump button */
-        n = 0;
-        XtSetArg(args[n], XtNlabel, "Jump"); n++;
-        button = XtCreateManagedWidget("timeJump", commandWidgetClass, tools_box, args, n);
-        XtAddCallback(button, XtNcallback, time_jump_button_callback, NULL);
-
-        /* Time Series button */
-        n = 0;
-        XtSetArg(args[n], XtNlabel, "Series"); n++;
-        button = XtCreateManagedWidget("timeSeries", commandWidgetClass, tools_box, args, n);
-        XtAddCallback(button, XtNcallback, time_series_button_callback, NULL);
-    }
-
     /* COLUMN 3: Level buttons (only if multiple levels exist) */
     if (pf->n_levels > 1) {
         n = 0;
         XtSetArg(args[n], XtNfromVert, canvas_widget); n++;
-        XtSetArg(args[n], XtNfromHoriz, tools_box); n++;
+        XtSetArg(args[n], XtNfromHoriz, axis_box); n++;
         XtSetArg(args[n], XtNborderWidth, 1); n++;
         XtSetArg(args[n], XtNorientation, XtorientHorizontal); n++;
         XtSetArg(args[n], XtNbottom, XawChainBottom); n++;
@@ -1228,7 +1191,54 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
             XtAddCallback(button, XtNcallback, level_button_callback, (XtPointer)(long)i);
         }
     }
-    
+
+    /* ROW 2: Time navigation (only if multiple timesteps) */
+    if (n_timesteps > 1) {
+        Widget time_box;
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, nav_box); n++;
+        XtSetArg(args[n], XtNfromHoriz, var_box); n++;
+        XtSetArg(args[n], XtNborderWidth, 1); n++;
+        XtSetArg(args[n], XtNorientation, XtorientHorizontal); n++;
+        XtSetArg(args[n], XtNbottom, XawChainBottom); n++;
+        XtSetArg(args[n], XtNleft, XawChainLeft); n++;
+        time_box = XtCreateManagedWidget("timeBox", boxWidgetClass, form, args, n);
+
+        /* Time label */
+        n = 0;
+        XtSetArg(args[n], XtNlabel, "Time"); n++;
+        XtSetArg(args[n], XtNborderWidth, 0); n++;
+        XtCreateManagedWidget("timeText", labelWidgetClass, time_box, args, n);
+
+        /* Time navigation buttons (</>)  */
+        const char *time_labels[] = {"<", ">"};
+        for (i = 0; i < 2; i++) {
+            n = 0;
+            XtSetArg(args[n], XtNlabel, time_labels[i]); n++;
+            button = XtCreateManagedWidget(time_labels[i], commandWidgetClass, time_box, args, n);
+            XtAddCallback(button, XtNcallback, time_nav_button_callback, (XtPointer)(long)i);
+        }
+
+        /* Time index display label */
+        n = 0;
+        XtSetArg(args[n], XtNlabel, "1/1"); n++;
+        XtSetArg(args[n], XtNwidth, 60); n++;
+        XtSetArg(args[n], XtNborderWidth, 1); n++;
+        time_label = XtCreateManagedWidget("timeLabel", labelWidgetClass, time_box, args, n);
+
+        /* Time Jump button */
+        n = 0;
+        XtSetArg(args[n], XtNlabel, "Jump"); n++;
+        button = XtCreateManagedWidget("timeJump", commandWidgetClass, time_box, args, n);
+        XtAddCallback(button, XtNcallback, time_jump_button_callback, NULL);
+
+        /* Time Series button */
+        n = 0;
+        XtSetArg(args[n], XtNlabel, "Series"); n++;
+        button = XtCreateManagedWidget("timeSeries", commandWidgetClass, time_box, args, n);
+        XtAddCallback(button, XtNcallback, time_series_button_callback, NULL);
+    }
+
     /* Colorbar widget */
     n = 0;
     XtSetArg(args[n], XtNfromVert, info_label); n++;
@@ -3295,10 +3305,10 @@ void show_time_series(PlotfileData *pf) {
         XtNborderWidth, 1,
         NULL);
 
-    /* Add expose event handlers - using horizontal plot (timestep on Y, value on X) */
-    XtAddEventHandler(mean_canvas, ExposureMask, False, horizontal_plot_expose_handler, mean_plot);
-    XtAddEventHandler(std_canvas, ExposureMask, False, horizontal_plot_expose_handler, std_plot);
-    XtAddEventHandler(skewness_canvas, ExposureMask, False, horizontal_plot_expose_handler, skewness_plot);
+    /* Add expose event handlers - using standard plot (timestep on X, value on Y) */
+    XtAddEventHandler(mean_canvas, ExposureMask, False, plot_expose_handler, mean_plot);
+    XtAddEventHandler(std_canvas, ExposureMask, False, plot_expose_handler, std_plot);
+    XtAddEventHandler(skewness_canvas, ExposureMask, False, plot_expose_handler, skewness_plot);
 
     /* Close button */
     Widget close_button = XtVaCreateManagedWidget("Close",
