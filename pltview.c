@@ -81,6 +81,43 @@ typedef struct {
     PlotData *plot_data_array[3];
 } PopupData;
 
+#define MAX_SDM_VARS 32
+#define SDM_SUBDIR "super_droplets_moisture"
+
+/* Y-axis metric types for SDM histogram */
+#define SDM_METRIC_PARTICLE_COUNT   0  /* Sum of multiplicity per bin */
+#define SDM_METRIC_SD_COUNT         1  /* Number of super droplets per bin */
+#define SDM_METRIC_CONCENTRATION    2  /* Particle count / domain volume */
+#define SDM_METRIC_MASS             3  /* Sum of (mass * multiplicity) per bin */
+#define SDM_METRIC_MEAN_MULT        4  /* Mean multiplicity per bin */
+#define SDM_N_METRICS               5
+
+typedef struct {
+    int n_particles;
+    int n_real_comps;   /* Number of real components (from Header, excluding x,y,z) */
+    int n_int_comps;    /* Number of int components (from Header, excluding id,cpu) */
+    char real_comp_names[MAX_SDM_VARS][64];
+    char int_comp_names[MAX_SDM_VARS][64];
+    int ndim;
+    double *radius;        /* Extracted radius array */
+    double *multiplicity;  /* Extracted multiplicity array */
+    double *mass;          /* Extracted particle_mass array */
+    int radius_idx;        /* Index of "radius" in real comp names */
+    int mult_idx;          /* Index of "multiplicity" */
+    int mass_idx;          /* Index of "particle_mass" */
+    double domain_volume;  /* For number concentration */
+    int current_metric;    /* Current y-axis metric (SDM_METRIC_*) */
+    int log_x;              /* 0=linear, 1=log10 x-axis */
+    int log_y;              /* 0=linear, 1=log10 y-axis */
+    double cutoff_radius;   /* Cutoff in um (0 = no cutoff) */
+    double custom_bin_width; /* Custom bin width in um (0 = auto/Sturges) */
+    /* Per-grid info from particle Header */
+    int n_grids;
+    int grid_file_num[MAX_BOXES];
+    int grid_count[MAX_BOXES];
+    long grid_offset[MAX_BOXES];
+} ParticleData;
+
 /* X11 globals */
 Display *display;
 Widget toplevel, form, canvas_widget, var_box, info_label;
@@ -117,6 +154,34 @@ int timestep_numbers[MAX_TIMESTEPS];   /* Numerical values for sorting */
 int n_timesteps = 0;                   /* Number of timesteps found */
 int current_timestep = 0;              /* Current timestep index */
 Widget time_label = NULL;              /* Time step display label */
+
+/* Data structure for histogram expose handler (forward declaration for SDM) */
+typedef struct {
+    double *bin_counts;
+    double *bin_centers;
+    int n_bins;
+    double count_max;
+    double bin_min, bin_max;
+    char title[128];
+    char xlabel[64];
+    double mean, std, skewness;
+    double kurtosis;
+} HistogramData;
+
+/* SDM mode globals */
+int sdm_mode = 0;                /* Flag for SDM mode */
+ParticleData *global_pd = NULL;  /* Global particle data pointer */
+Widget sdm_canvas_widget = NULL;
+Widget sdm_metric_buttons[SDM_N_METRICS];
+Widget sdm_info_label = NULL;
+Window sdm_canvas = 0;
+HistogramData *sdm_hist_data = NULL;  /* Persistent histogram data for SDM canvas */
+Widget sdm_settings_text_cutoff = NULL;
+Widget sdm_settings_text_binwidth = NULL;
+int sdm_dialog_active = 0;
+Widget sdm_active_text_widget = NULL;
+int sdm_active_field = 0;  /* 0=cutoff, 1=binwidth */
+Widget sdm_dialog_shell = NULL;
 
 /* Function prototypes */
 int detect_levels(PlotfileData *pf);
@@ -159,12 +224,30 @@ void canvas_button_handler(Widget w, XtPointer client_data, XEvent *event, Boole
 void show_line_profiles(PlotfileData *pf, int data_x, int data_y);
 void cleanup(PlotfileData *pf);
 int scan_timesteps(const char *base_dir, const char *prefix);
+int scan_sdm_timesteps(const char *base_dir, const char *prefix);
 void switch_timestep(PlotfileData *pf, int new_timestep);
 void time_nav_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void update_time_label(void);
 void time_jump_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void time_series_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void show_time_series(PlotfileData *pf);
+
+/* SDM functions */
+int read_sdm_header(ParticleData *pd, const char *plotfile_dir);
+int read_sdm_data(ParticleData *pd, const char *plotfile_dir);
+double compute_domain_volume(const char *plotfile_dir);
+void compute_sdm_histogram(ParticleData *pd, HistogramData *hist);
+void init_sdm_gui(ParticleData *pd, const char *plotfile_dir, int argc, char **argv);
+void render_sdm_histogram(ParticleData *pd);
+void draw_sdm_histogram(Display *dpy, Window win, GC plot_gc, HistogramData *hist,
+                         int width, int height, int log_x, int log_y, const char *ylabel);
+void sdm_switch_timestep(ParticleData *pd, int new_timestep);
+void update_sdm_info_label(ParticleData *pd, const char *plotfile_dir);
+void sdm_logx_callback(Widget w, XtPointer client_data, XtPointer call_data);
+void sdm_logy_callback(Widget w, XtPointer client_data, XtPointer call_data);
+void sdm_settings_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
+void sdm_settings_apply_callback(Widget w, XtPointer client_data, XtPointer call_data);
+void sdm_settings_close_callback(Widget w, XtPointer client_data, XtPointer call_data);
 
 /* Global pointer for callbacks */
 PlotfileData *global_pf = NULL;
@@ -267,6 +350,79 @@ int scan_timesteps(const char *base_dir, const char *prefix) {
     }
 
     printf("Found %d timesteps\n", n_timesteps);
+    return n_timesteps;
+}
+
+/* Scan directory for plotfiles with SDM data and sort them by number */
+int scan_sdm_timesteps(const char *base_dir, const char *prefix) {
+    DIR *dir;
+    struct dirent *entry;
+    char check_path[MAX_PATH];
+    int indices[MAX_TIMESTEPS];
+    int prefix_len = strlen(prefix);
+
+    dir = opendir(base_dir);
+    if (!dir) {
+        fprintf(stderr, "Error: Cannot open directory %s\n", base_dir);
+        return -1;
+    }
+
+    n_timesteps = 0;
+
+    while ((entry = readdir(dir)) != NULL && n_timesteps < MAX_TIMESTEPS) {
+        if (strncmp(entry->d_name, prefix, prefix_len) == 0) {
+            const char *suffix = entry->d_name + prefix_len;
+            int all_digits = 1;
+            if (*suffix == '\0') all_digits = 0;
+            for (const char *p = suffix; *p != '\0'; p++) {
+                if (!isdigit(*p)) {
+                    all_digits = 0;
+                    break;
+                }
+            }
+            if (!all_digits) continue;
+
+            /* Check for SDM subdirectory Header */
+            snprintf(check_path, MAX_PATH, "%s/%s/%s/Header",
+                     base_dir, entry->d_name, SDM_SUBDIR);
+            FILE *fp = fopen(check_path, "r");
+            if (fp) {
+                fclose(fp);
+
+                int num = atoi(entry->d_name + prefix_len);
+
+                timestep_paths[n_timesteps] = (char *)malloc(MAX_PATH);
+                snprintf(timestep_paths[n_timesteps], MAX_PATH, "%s/%s", base_dir, entry->d_name);
+                timestep_numbers[n_timesteps] = num;
+                indices[n_timesteps] = n_timesteps;
+                n_timesteps++;
+            }
+        }
+    }
+
+    closedir(dir);
+
+    if (n_timesteps == 0) {
+        return -1;
+    }
+
+    /* Sort indices by timestep number */
+    qsort(indices, n_timesteps, sizeof(int), compare_timesteps);
+
+    char *temp_paths[MAX_TIMESTEPS];
+    int temp_numbers[MAX_TIMESTEPS];
+
+    for (int i = 0; i < n_timesteps; i++) {
+        temp_paths[i] = timestep_paths[indices[i]];
+        temp_numbers[i] = timestep_numbers[indices[i]];
+    }
+
+    for (int i = 0; i < n_timesteps; i++) {
+        timestep_paths[i] = temp_paths[i];
+        timestep_numbers[i] = temp_numbers[i];
+    }
+
+    printf("Found %d SDM timesteps\n", n_timesteps);
     return n_timesteps;
 }
 
@@ -742,6 +898,231 @@ int read_variable_data(PlotfileData *pf, int var_idx) {
     }
     
     printf("Loaded variable: %s\n", pf->variables[var_idx]);
+    return 0;
+}
+
+/* ========== SDM (Super Droplet Moisture) Functions ========== */
+
+/* Read particle Header from super_droplets_moisture subdirectory */
+int read_sdm_header(ParticleData *pd, const char *plotfile_dir) {
+    char path[MAX_PATH];
+    char line[MAX_LINE];
+    FILE *fp;
+
+    snprintf(path, MAX_PATH, "%s/%s/Header", plotfile_dir, SDM_SUBDIR);
+    fp = fopen(path, "r");
+    if (!fp) {
+        fprintf(stderr, "Error: Cannot open %s\n", path);
+        return -1;
+    }
+
+    /* Line 1: version string */
+    fgets(line, MAX_LINE, fp);
+    line[strcspn(line, "\n")] = 0;
+    if (strstr(line, "Version_Two") == NULL) {
+        fprintf(stderr, "Warning: Unexpected particle version: %s\n", line);
+    }
+
+    /* Line 2: ndim */
+    fgets(line, MAX_LINE, fp);
+    pd->ndim = atoi(line);
+
+    /* Line 3: n_real_comps (excluding x,y,z) */
+    fgets(line, MAX_LINE, fp);
+    pd->n_real_comps = atoi(line);
+
+    /* Real component names */
+    for (int i = 0; i < pd->n_real_comps && i < MAX_SDM_VARS; i++) {
+        fgets(line, MAX_LINE, fp);
+        line[strcspn(line, "\n")] = 0;
+        strncpy(pd->real_comp_names[i], line, 63);
+    }
+
+    /* n_int_comps (excluding id, cpu) */
+    fgets(line, MAX_LINE, fp);
+    pd->n_int_comps = atoi(line);
+
+    /* Int component names */
+    for (int i = 0; i < pd->n_int_comps && i < MAX_SDM_VARS; i++) {
+        fgets(line, MAX_LINE, fp);
+        line[strcspn(line, "\n")] = 0;
+        strncpy(pd->int_comp_names[i], line, 63);
+    }
+
+    /* Skip: is_checkpoint line */
+    fgets(line, MAX_LINE, fp);
+
+    /* Total number of particles */
+    fgets(line, MAX_LINE, fp);
+    pd->n_particles = atoi(line);
+
+    /* Skip: max_next_id */
+    fgets(line, MAX_LINE, fp);
+
+    /* finest_level (should be 0 for single-level) */
+    fgets(line, MAX_LINE, fp);
+    /* int finest_level = atoi(line); */
+
+    /* Number of grids at level 0 */
+    fgets(line, MAX_LINE, fp);
+    pd->n_grids = atoi(line);
+
+    /* Per-grid info: file_number count offset */
+    for (int i = 0; i < pd->n_grids && i < MAX_BOXES; i++) {
+        fgets(line, MAX_LINE, fp);
+        sscanf(line, "%d %d %ld", &pd->grid_file_num[i],
+               &pd->grid_count[i], &pd->grid_offset[i]);
+    }
+
+    fclose(fp);
+
+    /* Find indices for radius, multiplicity, particle_mass in real comp names */
+    pd->radius_idx = -1;
+    pd->mult_idx = -1;
+    pd->mass_idx = -1;
+
+    for (int i = 0; i < pd->n_real_comps; i++) {
+        if (strcmp(pd->real_comp_names[i], "radius") == 0)
+            pd->radius_idx = i;
+        else if (strcmp(pd->real_comp_names[i], "multiplicity") == 0)
+            pd->mult_idx = i;
+        else if (strcmp(pd->real_comp_names[i], "particle_mass") == 0)
+            pd->mass_idx = i;
+    }
+
+    if (pd->radius_idx < 0 || pd->mult_idx < 0 || pd->mass_idx < 0) {
+        fprintf(stderr, "Error: Missing required particle components (radius=%d, multiplicity=%d, particle_mass=%d)\n",
+                pd->radius_idx, pd->mult_idx, pd->mass_idx);
+        return -1;
+    }
+
+    printf("SDM Header: %d particles, %d real comps, %d int comps, %d grids\n",
+           pd->n_particles, pd->n_real_comps, pd->n_int_comps, pd->n_grids);
+    printf("  radius_idx=%d, multiplicity_idx=%d, mass_idx=%d\n",
+           pd->radius_idx, pd->mult_idx, pd->mass_idx);
+
+    return 0;
+}
+
+/* Compute domain volume from main plotfile Header */
+double compute_domain_volume(const char *plotfile_dir) {
+    char path[MAX_PATH];
+    char line[MAX_LINE];
+    FILE *fp;
+
+    snprintf(path, MAX_PATH, "%s/Header", plotfile_dir);
+    fp = fopen(path, "r");
+    if (!fp) return 1.0;
+
+    /* Skip: version */
+    fgets(line, MAX_LINE, fp);
+    /* Skip: n_vars */
+    fgets(line, MAX_LINE, fp);
+    int n_vars = atoi(line);
+    /* Skip: variable names */
+    for (int i = 0; i < n_vars; i++)
+        fgets(line, MAX_LINE, fp);
+    /* Read: ndim */
+    fgets(line, MAX_LINE, fp);
+    int ndim = atoi(line);
+    /* Skip: time */
+    fgets(line, MAX_LINE, fp);
+    /* Skip: finest_level */
+    fgets(line, MAX_LINE, fp);
+
+    /* Read prob_lo (one value per dimension on one line) */
+    fgets(line, MAX_LINE, fp);
+    double prob_lo[3] = {0, 0, 0};
+    if (ndim == 3) sscanf(line, "%lf %lf %lf", &prob_lo[0], &prob_lo[1], &prob_lo[2]);
+    else if (ndim == 2) sscanf(line, "%lf %lf", &prob_lo[0], &prob_lo[1]);
+
+    /* Read prob_hi */
+    fgets(line, MAX_LINE, fp);
+    double prob_hi[3] = {0, 0, 0};
+    if (ndim == 3) sscanf(line, "%lf %lf %lf", &prob_hi[0], &prob_hi[1], &prob_hi[2]);
+    else if (ndim == 2) sscanf(line, "%lf %lf", &prob_hi[0], &prob_hi[1]);
+
+    fclose(fp);
+
+    double volume = 1.0;
+    for (int d = 0; d < ndim; d++) {
+        volume *= (prob_hi[d] - prob_lo[d]);
+    }
+
+    printf("Domain volume: %g (bounds: [%g,%g] x [%g,%g] x [%g,%g])\n",
+           volume, prob_lo[0], prob_hi[0], prob_lo[1], prob_hi[1], prob_lo[2], prob_hi[2]);
+    return volume;
+}
+
+/* Read particle binary data from DATA files */
+int read_sdm_data(ParticleData *pd, const char *plotfile_dir) {
+    char path[MAX_PATH];
+
+    /* Free previous data */
+    if (pd->radius) { free(pd->radius); pd->radius = NULL; }
+    if (pd->multiplicity) { free(pd->multiplicity); pd->multiplicity = NULL; }
+    if (pd->mass) { free(pd->mass); pd->mass = NULL; }
+
+    if (pd->n_particles <= 0) {
+        printf("No particles in %s (0 particles)\n", plotfile_dir);
+        return 0;  /* Not an error — timestep may simply have no particles yet */
+    }
+
+    pd->radius = (double *)malloc(pd->n_particles * sizeof(double));
+    pd->multiplicity = (double *)malloc(pd->n_particles * sizeof(double));
+    pd->mass = (double *)malloc(pd->n_particles * sizeof(double));
+
+    int ints_per_particle = 2 + pd->n_int_comps;   /* id, cpu, int_comp0, int_comp1, ... */
+    int reals_per_particle = pd->ndim + pd->n_real_comps;  /* x,y,z + real comps */
+
+    /* Indices within the real block (0-based, including x,y,z) */
+    int real_radius_idx = pd->ndim + pd->radius_idx;
+    int real_mult_idx = pd->ndim + pd->mult_idx;
+    int real_mass_idx = pd->ndim + pd->mass_idx;
+
+    int particle_offset = 0;  /* Running offset into output arrays */
+
+    for (int g = 0; g < pd->n_grids; g++) {
+        int count = pd->grid_count[g];
+        if (count <= 0) continue;
+
+        snprintf(path, MAX_PATH, "%s/%s/Level_0/DATA_%05d",
+                 plotfile_dir, SDM_SUBDIR, pd->grid_file_num[g]);
+        FILE *fp = fopen(path, "rb");
+        if (!fp) {
+            fprintf(stderr, "Error: Cannot open %s\n", path);
+            continue;
+        }
+
+        /* Seek to grid offset */
+        fseek(fp, pd->grid_offset[g], SEEK_SET);
+
+        /* Skip int block: count * ints_per_particle * sizeof(int32_t) */
+        fseek(fp, (long)count * ints_per_particle * sizeof(int), SEEK_CUR);
+
+        /* Read real data for all particles in this grid */
+        double *real_buf = (double *)malloc((size_t)count * reals_per_particle * sizeof(double));
+        size_t read_count = fread(real_buf, sizeof(double), (size_t)count * reals_per_particle, fp);
+        fclose(fp);
+
+        if ((int)read_count != count * reals_per_particle) {
+            fprintf(stderr, "Warning: Short read for grid %d: got %zu expected %d\n",
+                    g, read_count, count * reals_per_particle);
+        }
+
+        /* Extract radius, multiplicity, mass for each particle */
+        for (int p = 0; p < count && (particle_offset + p) < pd->n_particles; p++) {
+            double *pdata = real_buf + (size_t)p * reals_per_particle;
+            pd->radius[particle_offset + p] = pdata[real_radius_idx];
+            pd->multiplicity[particle_offset + p] = pdata[real_mult_idx];
+            pd->mass[particle_offset + p] = pdata[real_mass_idx];
+        }
+
+        particle_offset += count;
+        free(real_buf);
+    }
+
+    printf("Loaded %d particles from %s\n", particle_offset, plotfile_dir);
     return 0;
 }
 
@@ -2864,17 +3245,204 @@ void draw_histogram(Display *dpy, Window win, GC plot_gc, double *bin_counts, do
     XFlush(dpy);
 }
 
-/* Data structure for histogram expose handler */
-typedef struct {
-    double *bin_counts;
-    double *bin_centers;
-    int n_bins;
-    double count_max;
-    double bin_min, bin_max;
-    char title[128];
-    char xlabel[64];
-    double mean, std, skewness;
-} HistogramData;
+/* Draw SDM histogram with um units, log scale support, kurtosis, cutoff info */
+void draw_sdm_histogram(Display *dpy, Window win, GC plot_gc, HistogramData *hist,
+                         int width, int height, int log_x, int log_y, const char *ylabel) {
+    /* Clear background */
+    XSetForeground(dpy, plot_gc, WhitePixel(dpy, screen));
+    XFillRectangle(dpy, win, plot_gc, 0, 0, width, height);
+
+    /* Draw border */
+    XSetForeground(dpy, plot_gc, BlackPixel(dpy, screen));
+    XDrawRectangle(dpy, win, plot_gc, 0, 0, width - 1, height - 1);
+
+    if (!hist || hist->n_bins < 1) {
+        /* No data — show message */
+        if (font) XSetFont(dpy, plot_gc, font->fid);
+        const char *msg = "No particles in this timestep";
+        int mw = font ? XTextWidth(font, msg, strlen(msg)) : 0;
+        XDrawString(dpy, win, plot_gc, (width - mw) / 2, height / 2, msg, strlen(msg));
+        XFlush(dpy);
+        return;
+    }
+
+    /* Draw title */
+    if (font) {
+        XSetFont(dpy, plot_gc, font->fid);
+        XDrawString(dpy, win, plot_gc, 10, 20, hist->title, strlen(hist->title));
+    }
+
+    /* Plot area with wider left margin for y-axis label */
+    int plot_left = 100;
+    int plot_right = width - 20;
+    int plot_top = 40;
+    int plot_bottom = height - 100;
+    int plot_width = plot_right - plot_left;
+    int plot_height = plot_bottom - plot_top;
+
+    if (plot_width <= 0 || plot_height <= 0) return;
+
+    /* Draw axes */
+    XDrawLine(dpy, win, plot_gc, plot_left, plot_bottom, plot_right, plot_bottom);
+    XDrawLine(dpy, win, plot_gc, plot_left, plot_top, plot_left, plot_bottom);
+
+    /* Y-axis label (drawn horizontally above y-axis) */
+    if (ylabel && ylabel[0]) {
+        XDrawString(dpy, win, plot_gc, plot_left, plot_top - 8, ylabel, strlen(ylabel));
+    }
+
+    /* Determine Y range */
+    double y_max = hist->count_max;
+    double y_min_display = 0;
+    if (log_y) {
+        /* For log Y, find min positive value */
+        double min_pos = y_max;
+        for (int i = 0; i < hist->n_bins; i++) {
+            if (hist->bin_counts[i] > 0 && hist->bin_counts[i] < min_pos)
+                min_pos = hist->bin_counts[i];
+        }
+        y_min_display = pow(10.0, floor(log10(min_pos > 0 ? min_pos : 1)));
+        y_max = pow(10.0, ceil(log10(y_max > 0 ? y_max : 1)));
+        if (y_min_display >= y_max) y_min_display = y_max / 10.0;
+    }
+
+    /* Draw Y-axis ticks */
+    char label[64];
+    if (log_y) {
+        double log_ymin = log10(y_min_display);
+        double log_ymax = log10(y_max);
+        int imin = (int)floor(log_ymin);
+        int imax = (int)ceil(log_ymax);
+        for (int i = imin; i <= imax; i++) {
+            double y_val = pow(10.0, i);
+            if (y_val < y_min_display || y_val > y_max) continue;
+            double frac = (log10(y_val) - log_ymin) / (log_ymax - log_ymin);
+            int y_pos = plot_bottom - (int)(plot_height * frac);
+            XDrawLine(dpy, win, plot_gc, plot_left - 3, y_pos, plot_left, y_pos);
+            snprintf(label, sizeof(label), "1e%d", i);
+            int lw = XTextWidth(font, label, strlen(label));
+            XDrawString(dpy, win, plot_gc, plot_left - lw - 5, y_pos + 4, label, strlen(label));
+        }
+    } else {
+        int num_y_ticks = 4;
+        for (int i = 0; i <= num_y_ticks; i++) {
+            double y_val = y_max * i / num_y_ticks;
+            int y_pos = plot_bottom - (int)(plot_height * i / num_y_ticks);
+            XDrawLine(dpy, win, plot_gc, plot_left - 3, y_pos, plot_left, y_pos);
+            if (y_val >= 1e6 || (y_val != 0 && y_val < 0.01))
+                snprintf(label, sizeof(label), "%.1e", y_val);
+            else
+                snprintf(label, sizeof(label), "%.0f", y_val);
+            int lw = XTextWidth(font, label, strlen(label));
+            XDrawString(dpy, win, plot_gc, plot_left - lw - 5, y_pos + 4, label, strlen(label));
+        }
+    }
+
+    /* Determine X range */
+    double x_min = hist->bin_min;
+    double x_max = hist->bin_max;
+    double log_xmin = 0, log_xmax = 1;
+    if (log_x) {
+        log_xmin = (x_min > 0) ? log10(x_min) : log10(x_max) - 3;
+        log_xmax = (x_max > 0) ? log10(x_max) : 0;
+        if (log_xmin >= log_xmax) log_xmin = log_xmax - 1;
+    }
+
+    /* Draw X-axis ticks */
+    if (log_x) {
+        int imin = (int)floor(log_xmin);
+        int imax = (int)ceil(log_xmax);
+        for (int i = imin; i <= imax; i++) {
+            double x_val = pow(10.0, i);
+            double frac = (log10(x_val) - log_xmin) / (log_xmax - log_xmin);
+            if (frac < 0 || frac > 1) continue;
+            int x_pos = plot_left + (int)(plot_width * frac);
+            XDrawLine(dpy, win, plot_gc, x_pos, plot_bottom, x_pos, plot_bottom + 3);
+            snprintf(label, sizeof(label), "1e%d", i);
+            int lw = XTextWidth(font, label, strlen(label));
+            XDrawString(dpy, win, plot_gc, x_pos - lw / 2, plot_bottom + 14, label, strlen(label));
+        }
+    } else {
+        int num_x_ticks = 5;
+        for (int i = 0; i <= num_x_ticks; i++) {
+            double x_val = x_min + (x_max - x_min) * i / num_x_ticks;
+            int x_pos = plot_left + (int)(plot_width * i / num_x_ticks);
+            XDrawLine(dpy, win, plot_gc, x_pos, plot_bottom, x_pos, plot_bottom + 3);
+            snprintf(label, sizeof(label), "%.2f", x_val);
+            int lw = XTextWidth(font, label, strlen(label));
+            XDrawString(dpy, win, plot_gc, x_pos - lw / 2, plot_bottom + 14, label, strlen(label));
+        }
+    }
+
+    /* Draw x-axis label */
+    {
+        const char *xlab = "radius (um)";
+        int xlab_w = XTextWidth(font, xlab, strlen(xlab));
+        XDrawString(dpy, win, plot_gc, plot_left + (plot_width - xlab_w) / 2,
+                    plot_bottom + 30, xlab, strlen(xlab));
+    }
+
+    /* Draw histogram bars */
+    XSetForeground(dpy, plot_gc, 0x4444FF);
+    double bin_width = (hist->n_bins > 1) ? (x_max - x_min) / hist->n_bins : 1.0;
+
+    double log_ymin_d = log_y ? log10(y_min_display) : 0;
+    double log_ymax_d = log_y ? log10(y_max) : y_max;
+
+    for (int i = 0; i < hist->n_bins; i++) {
+        double bc = hist->bin_centers[i];
+        double bcount = hist->bin_counts[i];
+        if (bcount <= 0 && log_y) continue;
+
+        int bar_x, bar_w, bar_h, bar_y;
+
+        if (log_x) {
+            double left_edge = bc - bin_width / 2;
+            double right_edge = bc + bin_width / 2;
+            if (left_edge <= 0) left_edge = x_min > 0 ? x_min : right_edge / 10;
+            if (right_edge <= 0) continue;
+            double frac_l = (log10(left_edge) - log_xmin) / (log_xmax - log_xmin);
+            double frac_r = (log10(right_edge) - log_xmin) / (log_xmax - log_xmin);
+            if (frac_l < 0) frac_l = 0;
+            if (frac_r > 1) frac_r = 1;
+            bar_x = plot_left + (int)(plot_width * frac_l);
+            bar_w = (int)(plot_width * (frac_r - frac_l));
+            if (bar_w < 1) bar_w = 1;
+        } else {
+            bar_x = plot_left + (int)((bc - x_min - bin_width / 2) / (x_max - x_min) * plot_width);
+            bar_w = (int)(bin_width / (x_max - x_min) * plot_width);
+            if (bar_w < 1) bar_w = 1;
+        }
+
+        if (log_y) {
+            double log_val = log10(bcount);
+            double frac = (log_val - log_ymin_d) / (log_ymax_d - log_ymin_d);
+            if (frac < 0) frac = 0;
+            bar_h = (int)(frac * plot_height);
+        } else {
+            bar_h = (int)(bcount / y_max * plot_height);
+        }
+        if (bar_h < 0) bar_h = 0;
+        bar_y = plot_bottom - bar_h;
+
+        XFillRectangle(dpy, win, plot_gc, bar_x, bar_y, bar_w, bar_h);
+    }
+
+    /* Draw statistics text (two lines) */
+    XSetForeground(dpy, plot_gc, BlackPixel(dpy, screen));
+    char stats[512];
+    snprintf(stats, sizeof(stats), "Mean: %.4f um   Std: %.4f um   Skew: %.4f   Kurt: %.4f",
+             hist->mean, hist->std, hist->skewness, hist->kurtosis);
+    XDrawString(dpy, win, plot_gc, plot_left, plot_bottom + 50, stats, strlen(stats));
+
+    /* Second line: cutoff info if applicable */
+    if (hist->xlabel[0] && strcmp(hist->xlabel, "radius (um)") != 0) {
+        /* xlabel used to carry cutoff info */
+        XDrawString(dpy, win, plot_gc, plot_left, plot_bottom + 68, hist->xlabel, strlen(hist->xlabel));
+    }
+
+    XFlush(dpy);
+}
 
 /* Expose event handler for histogram canvas */
 void histogram_expose_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_dispatch) {
@@ -3330,17 +3898,661 @@ void cleanup(PlotfileData *pf) {
     if (current_slice_data) free(current_slice_data);
 }
 
+/* ========== SDM Mode GUI and Rendering ========== */
+
+static const char *sdm_metric_labels[SDM_N_METRICS] = {
+    "Count", "SD Count", "Concentration", "Mass", "Mean Mult"
+};
+
+static const char *sdm_metric_ylabels[SDM_N_METRICS] = {
+    "Particle count",
+    "Super droplet count",
+    "Concentration (#/m3)",
+    "Mass (kg)",
+    "Mean multiplicity"
+};
+
+static const char *sdm_metric_titles[SDM_N_METRICS] = {
+    "Droplet Size Distribution - Particle Count",
+    "Droplet Size Distribution - Super Droplet Count",
+    "Droplet Size Distribution - Number Concentration",
+    "Droplet Size Distribution - Mass",
+    "Droplet Size Distribution - Mean Multiplicity"
+};
+
+/* Compute SDM histogram into the provided HistogramData struct */
+void compute_sdm_histogram(ParticleData *pd, HistogramData *hist) {
+    if (!pd || pd->n_particles <= 0 || !pd->radius) return;
+
+    /* Convert radius to um and apply cutoff filter */
+    int n_used = 0;
+    double *radius_um = (double *)malloc(pd->n_particles * sizeof(double));
+    double *mult_used = (double *)malloc(pd->n_particles * sizeof(double));
+    double *mass_used = (double *)malloc(pd->n_particles * sizeof(double));
+
+    for (int i = 0; i < pd->n_particles; i++) {
+        double r_um = pd->radius[i] * 1e6;  /* Convert to um */
+        if (pd->cutoff_radius > 0 && r_um <= pd->cutoff_radius) continue;
+        radius_um[n_used] = r_um;
+        mult_used[n_used] = pd->multiplicity[i];
+        mass_used[n_used] = pd->mass[i];
+        n_used++;
+    }
+
+    if (n_used == 0) {
+        free(radius_um); free(mult_used); free(mass_used);
+        /* Clear histogram */
+        if (hist->bin_counts) { free(hist->bin_counts); hist->bin_counts = NULL; }
+        if (hist->bin_centers) { free(hist->bin_centers); hist->bin_centers = NULL; }
+        hist->n_bins = 0;
+        hist->count_max = 1;
+        hist->mean = hist->std = hist->skewness = hist->kurtosis = 0;
+        snprintf(hist->title, sizeof(hist->title), "%s", sdm_metric_titles[pd->current_metric]);
+        snprintf(hist->xlabel, sizeof(hist->xlabel), "No particles after cutoff");
+        return;
+    }
+
+    /* Find radius range in um */
+    double rmin = radius_um[0], rmax = radius_um[0];
+    for (int i = 1; i < n_used; i++) {
+        if (radius_um[i] < rmin) rmin = radius_um[i];
+        if (radius_um[i] > rmax) rmax = radius_um[i];
+    }
+
+    /* Determine number of bins */
+    int n_bins;
+    double bin_width;
+    if (pd->custom_bin_width > 0) {
+        bin_width = pd->custom_bin_width;
+        n_bins = (int)ceil((rmax - rmin) / bin_width);
+        if (n_bins < 1) n_bins = 1;
+        if (n_bins > 500) n_bins = 500;
+        /* Adjust rmax to fit whole bins */
+        rmax = rmin + n_bins * bin_width;
+    } else {
+        n_bins = (int)(1 + 3.322 * log10((double)n_used));
+        if (n_bins < 10) n_bins = 10;
+        if (n_bins > 100) n_bins = 100;
+        bin_width = (rmax - rmin) / n_bins;
+        if (bin_width == 0) bin_width = 1.0;
+    }
+
+    /* Log-X binning: use log-spaced bins */
+    int use_log_bins = pd->log_x && rmin > 0;
+    double log_rmin = 0, log_rmax = 0, log_bin_width = 0;
+    if (use_log_bins) {
+        log_rmin = log10(rmin);
+        log_rmax = log10(rmax);
+        log_bin_width = (log_rmax - log_rmin) / n_bins;
+        if (log_bin_width <= 0) log_bin_width = 1.0 / n_bins;
+    }
+
+    /* Allocate bin arrays */
+    double *bin_counts = (double *)calloc(n_bins, sizeof(double));
+    double *bin_centers = (double *)malloc(n_bins * sizeof(double));
+    double *bin_sd_counts = (double *)calloc(n_bins, sizeof(double));
+    double *bin_mass = (double *)calloc(n_bins, sizeof(double));
+
+    if (use_log_bins) {
+        for (int i = 0; i < n_bins; i++) {
+            double log_center = log_rmin + (i + 0.5) * log_bin_width;
+            bin_centers[i] = pow(10.0, log_center);
+        }
+    } else {
+        for (int i = 0; i < n_bins; i++) {
+            bin_centers[i] = rmin + (i + 0.5) * bin_width;
+        }
+    }
+
+    /* Accumulate per-bin values */
+    for (int i = 0; i < n_used; i++) {
+        int bin;
+        if (use_log_bins) {
+            double log_r = log10(radius_um[i]);
+            bin = (int)((log_r - log_rmin) / log_bin_width);
+        } else {
+            bin = (int)((radius_um[i] - rmin) / bin_width);
+        }
+        if (bin < 0) bin = 0;
+        if (bin >= n_bins) bin = n_bins - 1;
+
+        bin_counts[bin] += mult_used[i];
+        bin_sd_counts[bin] += 1.0;
+        bin_mass[bin] += mass_used[i] * mult_used[i];
+    }
+
+    /* Select which metric to use as the displayed values */
+    double *display_values = (double *)malloc(n_bins * sizeof(double));
+    for (int i = 0; i < n_bins; i++) {
+        switch (pd->current_metric) {
+            case SDM_METRIC_PARTICLE_COUNT:
+                display_values[i] = bin_counts[i];
+                break;
+            case SDM_METRIC_SD_COUNT:
+                display_values[i] = bin_sd_counts[i];
+                break;
+            case SDM_METRIC_CONCENTRATION:
+                display_values[i] = (pd->domain_volume > 0) ?
+                    bin_counts[i] / pd->domain_volume : bin_counts[i];
+                break;
+            case SDM_METRIC_MASS:
+                display_values[i] = bin_mass[i];
+                break;
+            case SDM_METRIC_MEAN_MULT:
+                display_values[i] = (bin_sd_counts[i] > 0) ?
+                    bin_counts[i] / bin_sd_counts[i] : 0.0;
+                break;
+            default:
+                display_values[i] = bin_counts[i];
+                break;
+        }
+    }
+
+    /* Find max for scaling */
+    double count_max = 0;
+    for (int i = 0; i < n_bins; i++) {
+        if (display_values[i] > count_max) count_max = display_values[i];
+    }
+    if (count_max == 0) count_max = 1;
+
+    /* Compute statistics on radius in um (weighted by multiplicity) */
+    double total_mult = 0, sum_r = 0, sum_r2 = 0;
+    for (int i = 0; i < n_used; i++) {
+        double w = mult_used[i];
+        total_mult += w;
+        sum_r += radius_um[i] * w;
+        sum_r2 += radius_um[i] * radius_um[i] * w;
+    }
+    double mean = (total_mult > 0) ? sum_r / total_mult : 0;
+    double variance = (total_mult > 0) ? (sum_r2 / total_mult) - (mean * mean) : 0;
+    double std = (variance > 0) ? sqrt(variance) : 0;
+
+    double sum_third = 0, sum_fourth = 0;
+    for (int i = 0; i < n_used; i++) {
+        double diff = radius_um[i] - mean;
+        double d2 = diff * diff;
+        sum_third += d2 * diff * mult_used[i];
+        sum_fourth += d2 * d2 * mult_used[i];
+    }
+    double skewness = 0, kurtosis = 0;
+    if (std > 0 && total_mult > 0) {
+        double std3 = std * std * std;
+        skewness = (sum_third / total_mult) / std3;
+        kurtosis = (sum_fourth / total_mult) / (std * std * std * std) - 3.0;
+    }
+
+    /* Fill HistogramData */
+    if (hist->bin_counts) free(hist->bin_counts);
+    if (hist->bin_centers) free(hist->bin_centers);
+
+    hist->bin_counts = display_values;
+    hist->bin_centers = bin_centers;
+    hist->n_bins = n_bins;
+    hist->count_max = count_max;
+    hist->bin_min = rmin;
+    hist->bin_max = rmax;
+    hist->mean = mean;
+    hist->std = std;
+    hist->skewness = skewness;
+    hist->kurtosis = kurtosis;
+    snprintf(hist->title, sizeof(hist->title), "%s", sdm_metric_titles[pd->current_metric]);
+
+    /* Use xlabel to carry cutoff info for second stats line */
+    if (pd->cutoff_radius > 0) {
+        snprintf(hist->xlabel, sizeof(hist->xlabel), "Cutoff: %.2f um, %d particles used",
+                 pd->cutoff_radius, n_used);
+    } else {
+        hist->xlabel[0] = '\0';
+    }
+
+    free(bin_counts);
+    free(bin_sd_counts);
+    free(bin_mass);
+    free(radius_um);
+    free(mult_used);
+    free(mass_used);
+}
+
+/* Render SDM histogram directly to the SDM canvas */
+void render_sdm_histogram(ParticleData *pd) {
+    if (!pd || !sdm_canvas || !display) return;
+
+    /* Ensure histogram data exists */
+    if (!sdm_hist_data) {
+        sdm_hist_data = (HistogramData *)calloc(1, sizeof(HistogramData));
+    }
+
+    compute_sdm_histogram(pd, sdm_hist_data);
+
+    /* Get canvas dimensions */
+    Dimension width, height;
+    XtVaGetValues(sdm_canvas_widget, XtNwidth, &width, XtNheight, &height, NULL);
+
+    const char *ylabel = sdm_metric_ylabels[pd->current_metric];
+
+    GC plot_gc = XCreateGC(display, sdm_canvas, 0, NULL);
+    if (font) XSetFont(display, plot_gc, font->fid);
+    draw_sdm_histogram(display, sdm_canvas, plot_gc, sdm_hist_data,
+                       width, height, pd->log_x, pd->log_y, ylabel);
+    XFreeGC(display, plot_gc);
+}
+
+/* Update SDM info label */
+void update_sdm_info_label(ParticleData *pd, const char *plotfile_dir) {
+    if (!sdm_info_label || !pd) return;
+    char text[512];
+    const char *basename = strrchr(plotfile_dir, '/');
+    basename = basename ? basename + 1 : plotfile_dir;
+
+    if (n_timesteps > 1) {
+        snprintf(text, sizeof(text), "SDM: %s  |  Particles: %d  |  Metric: %s  |  Step %d/%d",
+                 basename, pd->n_particles, sdm_metric_labels[pd->current_metric],
+                 current_timestep + 1, n_timesteps);
+    } else {
+        snprintf(text, sizeof(text), "SDM: %s  |  Particles: %d  |  Metric: %s",
+                 basename, pd->n_particles, sdm_metric_labels[pd->current_metric]);
+    }
+
+    Arg args[1];
+    XtSetArg(args[0], XtNlabel, text);
+    XtSetValues(sdm_info_label, args, 1);
+}
+
+/* SDM metric button callback */
+void sdm_metric_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    int metric = (int)(long)client_data;
+    if (global_pd && metric >= 0 && metric < SDM_N_METRICS) {
+        global_pd->current_metric = metric;
+        render_sdm_histogram(global_pd);
+        update_sdm_info_label(global_pd, timestep_paths[current_timestep]);
+    }
+}
+
+/* SDM timestep switch */
+void sdm_switch_timestep(ParticleData *pd, int new_timestep) {
+    if (new_timestep < 0 || new_timestep >= n_timesteps) return;
+    current_timestep = new_timestep;
+
+    /* Re-read particle data from new timestep */
+    read_sdm_header(pd, timestep_paths[current_timestep]);
+    pd->domain_volume = compute_domain_volume(timestep_paths[current_timestep]);
+    read_sdm_data(pd, timestep_paths[current_timestep]);
+
+    render_sdm_histogram(pd);
+    update_sdm_info_label(pd, timestep_paths[current_timestep]);
+}
+
+/* SDM time navigation button callback */
+void sdm_time_nav_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    int dir = (int)(long)client_data;
+    if (!global_pd || n_timesteps <= 1) return;
+
+    int new_ts;
+    if (dir == 0) {  /* prev */
+        new_ts = current_timestep - 1;
+        if (new_ts < 0) new_ts = n_timesteps - 1;
+    } else {  /* next */
+        new_ts = current_timestep + 1;
+        if (new_ts >= n_timesteps) new_ts = 0;
+    }
+    sdm_switch_timestep(global_pd, new_ts);
+}
+
+/* SDM canvas expose handler */
+void sdm_canvas_expose_callback(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_dispatch) {
+    if (event->type != Expose) return;
+    if (global_pd) {
+        render_sdm_histogram(global_pd);
+    }
+}
+
+/* SDM LogX toggle callback */
+void sdm_logx_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    if (!global_pd) return;
+    global_pd->log_x = !global_pd->log_x;
+    render_sdm_histogram(global_pd);
+}
+
+/* SDM LogY toggle callback */
+void sdm_logy_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    if (!global_pd) return;
+    global_pd->log_y = !global_pd->log_y;
+    render_sdm_histogram(global_pd);
+}
+
+/* SDM Settings apply callback */
+void sdm_settings_apply_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    if (!global_pd) return;
+
+    Arg args[1];
+    String cutoff_str, binwidth_str;
+
+    if (sdm_settings_text_cutoff) {
+        XtSetArg(args[0], XtNstring, &cutoff_str);
+        XtGetValues(sdm_settings_text_cutoff, args, 1);
+        if (cutoff_str && strlen(cutoff_str) > 0)
+            global_pd->cutoff_radius = atof(cutoff_str);
+        else
+            global_pd->cutoff_radius = 0;
+    }
+
+    if (sdm_settings_text_binwidth) {
+        XtSetArg(args[0], XtNstring, &binwidth_str);
+        XtGetValues(sdm_settings_text_binwidth, args, 1);
+        if (binwidth_str && strlen(binwidth_str) > 0)
+            global_pd->custom_bin_width = atof(binwidth_str);
+        else
+            global_pd->custom_bin_width = 0;
+    }
+
+    /* Close dialog */
+    if (sdm_dialog_shell) {
+        XtPopdown(sdm_dialog_shell);
+        XtDestroyWidget(sdm_dialog_shell);
+        sdm_dialog_shell = NULL;
+    }
+    sdm_dialog_active = 0;
+    sdm_active_text_widget = NULL;
+    sdm_settings_text_cutoff = NULL;
+    sdm_settings_text_binwidth = NULL;
+
+    render_sdm_histogram(global_pd);
+    update_sdm_info_label(global_pd, timestep_paths[current_timestep]);
+}
+
+/* SDM Settings close callback */
+void sdm_settings_close_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    if (sdm_dialog_shell) {
+        XtPopdown(sdm_dialog_shell);
+        XtDestroyWidget(sdm_dialog_shell);
+        sdm_dialog_shell = NULL;
+    }
+    sdm_dialog_active = 0;
+    sdm_active_text_widget = NULL;
+    sdm_settings_text_cutoff = NULL;
+    sdm_settings_text_binwidth = NULL;
+}
+
+/* SDM Settings cutoff focus callback */
+void sdm_cutoff_focus_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    sdm_active_text_widget = sdm_settings_text_cutoff;
+    sdm_active_field = 0;
+}
+
+/* SDM Settings binwidth focus callback */
+void sdm_binwidth_focus_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    sdm_active_text_widget = sdm_settings_text_binwidth;
+    sdm_active_field = 1;
+}
+
+/* SDM Settings button callback - open popup dialog */
+void sdm_settings_button_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    Arg args[10];
+    int n;
+    Widget form_w, label, button_w;
+    char cutoff_str[64], binwidth_str[64];
+
+    /* Format current values */
+    if (global_pd && global_pd->cutoff_radius > 0)
+        snprintf(cutoff_str, sizeof(cutoff_str), "%.4f", global_pd->cutoff_radius);
+    else
+        cutoff_str[0] = '\0';
+
+    if (global_pd && global_pd->custom_bin_width > 0)
+        snprintf(binwidth_str, sizeof(binwidth_str), "%.4f", global_pd->custom_bin_width);
+    else
+        binwidth_str[0] = '\0';
+
+    n = 0;
+    XtSetArg(args[n], XtNtitle, "SDM Settings"); n++;
+    sdm_dialog_shell = XtCreatePopupShell("sdmSettings", transientShellWidgetClass, toplevel, args, n);
+
+    n = 0;
+    form_w = XtCreateManagedWidget("form", formWidgetClass, sdm_dialog_shell, args, n);
+
+    /* Title label */
+    n = 0;
+    XtSetArg(args[n], XtNlabel, "Histogram settings:"); n++;
+    XtSetArg(args[n], XtNborderWidth, 0); n++;
+    label = XtCreateManagedWidget("title", labelWidgetClass, form_w, args, n);
+
+    /* Cutoff label */
+    n = 0;
+    XtSetArg(args[n], XtNfromVert, label); n++;
+    XtSetArg(args[n], XtNlabel, "Cutoff (um):"); n++;
+    XtSetArg(args[n], XtNborderWidth, 0); n++;
+    Widget cutoff_label = XtCreateManagedWidget("cutoffLabel", labelWidgetClass, form_w, args, n);
+
+    /* Cutoff text input */
+    n = 0;
+    XtSetArg(args[n], XtNfromVert, label); n++;
+    XtSetArg(args[n], XtNfromHoriz, cutoff_label); n++;
+    XtSetArg(args[n], XtNwidth, 120); n++;
+    XtSetArg(args[n], XtNeditType, XawtextEdit); n++;
+    XtSetArg(args[n], XtNstring, cutoff_str); n++;
+    sdm_settings_text_cutoff = XtCreateManagedWidget("cutoffInput", asciiTextWidgetClass, form_w, args, n);
+
+    /* Bin width label */
+    n = 0;
+    XtSetArg(args[n], XtNfromVert, cutoff_label); n++;
+    XtSetArg(args[n], XtNlabel, "Bin width (um):"); n++;
+    XtSetArg(args[n], XtNborderWidth, 0); n++;
+    Widget bw_label = XtCreateManagedWidget("bwLabel", labelWidgetClass, form_w, args, n);
+
+    /* Bin width text input */
+    n = 0;
+    XtSetArg(args[n], XtNfromVert, cutoff_label); n++;
+    XtSetArg(args[n], XtNfromHoriz, bw_label); n++;
+    XtSetArg(args[n], XtNwidth, 120); n++;
+    XtSetArg(args[n], XtNeditType, XawtextEdit); n++;
+    XtSetArg(args[n], XtNstring, binwidth_str); n++;
+    sdm_settings_text_binwidth = XtCreateManagedWidget("bwInput", asciiTextWidgetClass, form_w, args, n);
+
+    /* Apply button */
+    n = 0;
+    XtSetArg(args[n], XtNfromVert, bw_label); n++;
+    XtSetArg(args[n], XtNlabel, "Apply"); n++;
+    button_w = XtCreateManagedWidget("apply", commandWidgetClass, form_w, args, n);
+    XtAddCallback(button_w, XtNcallback, sdm_settings_apply_callback, NULL);
+
+    /* Close button */
+    n = 0;
+    XtSetArg(args[n], XtNfromVert, bw_label); n++;
+    XtSetArg(args[n], XtNfromHoriz, button_w); n++;
+    XtSetArg(args[n], XtNlabel, "Close"); n++;
+    button_w = XtCreateManagedWidget("close", commandWidgetClass, form_w, args, n);
+    XtAddCallback(button_w, XtNcallback, sdm_settings_close_callback, NULL);
+
+    XtRealizeWidget(sdm_dialog_shell);
+    XtPopup(sdm_dialog_shell, XtGrabExclusive);
+
+    /* Set keyboard focus to cutoff text input */
+    XtSetKeyboardFocus(sdm_dialog_shell, sdm_settings_text_cutoff);
+    XSync(display, False);
+    Time time_val = CurrentTime;
+    XtCallAcceptFocus(sdm_settings_text_cutoff, &time_val);
+
+    sdm_dialog_active = 1;
+    sdm_active_text_widget = sdm_settings_text_cutoff;
+    sdm_active_field = 0;
+}
+
+/* Initialize SDM GUI */
+void init_sdm_gui(ParticleData *pd, const char *plotfile_dir, int argc, char **argv) {
+    Arg args[20];
+    int n;
+    Widget button;
+
+    global_pd = pd;
+
+    toplevel = XtAppInitialize(NULL, "PLTView-SDM", NULL, 0, &argc, argv, NULL, NULL, 0);
+    display = XtDisplay(toplevel);
+    screen = DefaultScreen(display);
+
+    /* Load font */
+    font = XLoadQueryFont(display, "fixed");
+    if (!font) font = XLoadQueryFont(display, "*");
+
+    /* Main form */
+    n = 0;
+    XtSetArg(args[n], XtNwidth, 750); n++;
+    XtSetArg(args[n], XtNheight, 600); n++;
+    form = XtCreateManagedWidget("form", formWidgetClass, toplevel, args, n);
+
+    /* Info label */
+    n = 0;
+    XtSetArg(args[n], XtNlabel, "SDM - Loading..."); n++;
+    XtSetArg(args[n], XtNwidth, 730); n++;
+    XtSetArg(args[n], XtNborderWidth, 1); n++;
+    XtSetArg(args[n], XtNtop, XawChainTop); n++;
+    XtSetArg(args[n], XtNleft, XawChainLeft); n++;
+    XtSetArg(args[n], XtNright, XawChainRight); n++;
+    sdm_info_label = XtCreateManagedWidget("info", labelWidgetClass, form, args, n);
+
+    /* Histogram canvas */
+    n = 0;
+    XtSetArg(args[n], XtNfromVert, sdm_info_label); n++;
+    XtSetArg(args[n], XtNwidth, 700); n++;
+    XtSetArg(args[n], XtNheight, 480); n++;
+    XtSetArg(args[n], XtNborderWidth, 2); n++;
+    XtSetArg(args[n], XtNtop, XawChainTop); n++;
+    XtSetArg(args[n], XtNbottom, XawChainBottom); n++;
+    XtSetArg(args[n], XtNleft, XawChainLeft); n++;
+    XtSetArg(args[n], XtNright, XawChainRight); n++;
+    sdm_canvas_widget = XtCreateManagedWidget("sdmCanvas", simpleWidgetClass, form, args, n);
+
+    /* Metric buttons row */
+    Widget metric_box;
+    n = 0;
+    XtSetArg(args[n], XtNfromVert, sdm_canvas_widget); n++;
+    XtSetArg(args[n], XtNborderWidth, 1); n++;
+    XtSetArg(args[n], XtNorientation, XtorientHorizontal); n++;
+    XtSetArg(args[n], XtNbottom, XawChainBottom); n++;
+    XtSetArg(args[n], XtNleft, XawChainLeft); n++;
+    metric_box = XtCreateManagedWidget("metricBox", boxWidgetClass, form, args, n);
+
+    /* Metric label */
+    n = 0;
+    XtSetArg(args[n], XtNlabel, "Y-axis:"); n++;
+    XtSetArg(args[n], XtNborderWidth, 0); n++;
+    XtCreateManagedWidget("metricLabel", labelWidgetClass, metric_box, args, n);
+
+    for (int i = 0; i < SDM_N_METRICS; i++) {
+        n = 0;
+        XtSetArg(args[n], XtNlabel, sdm_metric_labels[i]); n++;
+        sdm_metric_buttons[i] = XtCreateManagedWidget(sdm_metric_labels[i],
+            commandWidgetClass, metric_box, args, n);
+        XtAddCallback(sdm_metric_buttons[i], XtNcallback, sdm_metric_callback, (XtPointer)(long)i);
+    }
+
+    /* Options row (LogX, LogY, Settings) */
+    Widget options_box;
+    n = 0;
+    XtSetArg(args[n], XtNfromVert, metric_box); n++;
+    XtSetArg(args[n], XtNborderWidth, 1); n++;
+    XtSetArg(args[n], XtNorientation, XtorientHorizontal); n++;
+    XtSetArg(args[n], XtNbottom, XawChainBottom); n++;
+    XtSetArg(args[n], XtNleft, XawChainLeft); n++;
+    options_box = XtCreateManagedWidget("optionsBox", boxWidgetClass, form, args, n);
+
+    /* Options label */
+    n = 0;
+    XtSetArg(args[n], XtNlabel, "Options:"); n++;
+    XtSetArg(args[n], XtNborderWidth, 0); n++;
+    XtCreateManagedWidget("optLabel", labelWidgetClass, options_box, args, n);
+
+    /* LogX toggle button */
+    n = 0;
+    XtSetArg(args[n], XtNlabel, "LogX"); n++;
+    button = XtCreateManagedWidget("logX", commandWidgetClass, options_box, args, n);
+    XtAddCallback(button, XtNcallback, sdm_logx_callback, NULL);
+
+    /* LogY toggle button */
+    n = 0;
+    XtSetArg(args[n], XtNlabel, "LogY"); n++;
+    button = XtCreateManagedWidget("logY", commandWidgetClass, options_box, args, n);
+    XtAddCallback(button, XtNcallback, sdm_logy_callback, NULL);
+
+    /* Settings button */
+    n = 0;
+    XtSetArg(args[n], XtNlabel, "Settings"); n++;
+    button = XtCreateManagedWidget("settings", commandWidgetClass, options_box, args, n);
+    XtAddCallback(button, XtNcallback, sdm_settings_button_callback, NULL);
+
+    /* Time navigation row (if multi-timestep) */
+    if (n_timesteps > 1) {
+        Widget time_box;
+        n = 0;
+        XtSetArg(args[n], XtNfromVert, options_box); n++;
+        XtSetArg(args[n], XtNborderWidth, 1); n++;
+        XtSetArg(args[n], XtNorientation, XtorientHorizontal); n++;
+        XtSetArg(args[n], XtNbottom, XawChainBottom); n++;
+        XtSetArg(args[n], XtNleft, XawChainLeft); n++;
+        time_box = XtCreateManagedWidget("timeBox", boxWidgetClass, form, args, n);
+
+        /* Time label */
+        n = 0;
+        XtSetArg(args[n], XtNlabel, "Time"); n++;
+        XtSetArg(args[n], XtNborderWidth, 0); n++;
+        XtCreateManagedWidget("timeText", labelWidgetClass, time_box, args, n);
+
+        /* < > buttons */
+        const char *time_labels[] = {"<", ">"};
+        for (int i = 0; i < 2; i++) {
+            n = 0;
+            XtSetArg(args[n], XtNlabel, time_labels[i]); n++;
+            button = XtCreateManagedWidget(time_labels[i], commandWidgetClass, time_box, args, n);
+            XtAddCallback(button, XtNcallback, sdm_time_nav_callback, (XtPointer)(long)i);
+        }
+
+        /* Time index display */
+        char ts_text[32];
+        snprintf(ts_text, sizeof(ts_text), "%d/%d", current_timestep + 1, n_timesteps);
+        n = 0;
+        XtSetArg(args[n], XtNlabel, ts_text); n++;
+        XtSetArg(args[n], XtNwidth, 60); n++;
+        XtSetArg(args[n], XtNborderWidth, 1); n++;
+        time_label = XtCreateManagedWidget("timeLabel", labelWidgetClass, time_box, args, n);
+    }
+
+    XtRealizeWidget(toplevel);
+
+    /* Get canvas window */
+    sdm_canvas = XtWindow(sdm_canvas_widget);
+
+    /* Register expose handler */
+    XtAddEventHandler(sdm_canvas_widget, ExposureMask, False, sdm_canvas_expose_callback, NULL);
+
+    /* Enable keyboard events on canvas */
+    XSelectInput(display, sdm_canvas, ExposureMask | KeyPressMask);
+}
+
 int main(int argc, char **argv) {
     PlotfileData pf = {0};
     Arg args[2];
     char check_path[MAX_PATH];
     const char *prefix = "plt";  /* Default prefix */
 
+    /* Check for --sdm flag */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--sdm") == 0) {
+            sdm_mode = 1;
+            /* Shift remaining args over this flag */
+            for (int j = i; j < argc - 1; j++) {
+                argv[j] = argv[j + 1];
+            }
+            argc--;
+            i--;  /* Re-check this position */
+        }
+    }
+
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <plotfile_directory> [prefix]\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--sdm] <plotfile_directory> [prefix]\n", argv[0]);
         fprintf(stderr, "  Single plotfile:    %s plt00100\n", argv[0]);
         fprintf(stderr, "  Multi-timestep:     %s /path/to/dir plt\n", argv[0]);
         fprintf(stderr, "  With prefix plt2d:  %s /path/to/dir plt2d\n", argv[0]);
+        fprintf(stderr, "  SDM mode:           %s --sdm plt00100\n", argv[0]);
+        fprintf(stderr, "  SDM multi-timestep: %s --sdm /path/to/dir plt\n", argv[0]);
         return 1;
     }
 
@@ -3350,28 +4562,214 @@ int main(int argc, char **argv) {
     }
 
     /* Check if argument is a single plotfile or a directory containing plotfiles */
-    snprintf(check_path, MAX_PATH, "%s/Header", argv[1]);
-    FILE *fp = fopen(check_path, "r");
+    if (sdm_mode) {
+        /* SDM mode: check for super_droplets_moisture/Header */
+        snprintf(check_path, MAX_PATH, "%s/%s/Header", argv[1], SDM_SUBDIR);
+        FILE *fp = fopen(check_path, "r");
 
-    if (fp) {
-        /* Single plotfile mode */
-        fclose(fp);
-        n_timesteps = 1;
-        current_timestep = 0;
-        timestep_paths[0] = strdup(argv[1]);
-        timestep_numbers[0] = 0;
-        strncpy(pf.plotfile_dir, argv[1], MAX_PATH - 1);
-        printf("Single plotfile mode: %s\n", argv[1]);
+        if (fp) {
+            /* Single plotfile with SDM data */
+            fclose(fp);
+            n_timesteps = 1;
+            current_timestep = 0;
+            timestep_paths[0] = strdup(argv[1]);
+            timestep_numbers[0] = 0;
+            printf("SDM single plotfile mode: %s\n", argv[1]);
+        } else {
+            /* Multi-timestep: try explicit prefix first, then auto-detect */
+            int found = 0;
+            if (argc >= 3) {
+                /* Explicit prefix given */
+                printf("Scanning for SDM plotfiles with prefix '%s'...\n", prefix);
+                found = scan_sdm_timesteps(argv[1], prefix) > 0;
+            }
+            if (!found) {
+                /* Auto-detect prefix from first directory with SDM data */
+                DIR *autodir = opendir(argv[1]);
+                if (autodir) {
+                    struct dirent *ae;
+                    char detected_prefix[128] = "";
+                    while ((ae = readdir(autodir)) != NULL) {
+                        snprintf(check_path, MAX_PATH, "%s/%s/%s/Header",
+                                 argv[1], ae->d_name, SDM_SUBDIR);
+                        FILE *af = fopen(check_path, "r");
+                        if (af) {
+                            fclose(af);
+                            /* Extract prefix: everything before trailing digits */
+                            const char *name = ae->d_name;
+                            int len = strlen(name);
+                            int end = len;
+                            while (end > 0 && isdigit(name[end - 1])) end--;
+                            if (end > 0 && end < len) {
+                                strncpy(detected_prefix, name, end);
+                                detected_prefix[end] = '\0';
+                                break;
+                            }
+                        }
+                    }
+                    closedir(autodir);
+
+                    if (detected_prefix[0]) {
+                        printf("Auto-detected SDM prefix: '%s'\n", detected_prefix);
+                        prefix = strdup(detected_prefix);
+                        found = scan_sdm_timesteps(argv[1], prefix) > 0;
+                    }
+                }
+            }
+            if (!found) {
+                fprintf(stderr, "Error: No plotfiles with SDM data found in %s\n", argv[1]);
+                return 1;
+            }
+            current_timestep = 0;
+            printf("SDM multi-timestep mode: %d timesteps found\n", n_timesteps);
+        }
     } else {
-        /* Try multi-timestep mode - scan directory for plotfiles */
-        printf("Scanning for plotfiles with prefix '%s'...\n", prefix);
-        if (scan_timesteps(argv[1], prefix) <= 0) {
-            fprintf(stderr, "Error: No valid plotfiles with prefix '%s' found in %s\n", prefix, argv[1]);
+        snprintf(check_path, MAX_PATH, "%s/Header", argv[1]);
+        FILE *fp = fopen(check_path, "r");
+
+        if (fp) {
+            /* Single plotfile mode */
+            fclose(fp);
+            n_timesteps = 1;
+            current_timestep = 0;
+            timestep_paths[0] = strdup(argv[1]);
+            timestep_numbers[0] = 0;
+            strncpy(pf.plotfile_dir, argv[1], MAX_PATH - 1);
+            printf("Single plotfile mode: %s\n", argv[1]);
+        } else {
+            /* Try multi-timestep mode - scan directory for plotfiles */
+            printf("Scanning for plotfiles with prefix '%s'...\n", prefix);
+            if (scan_timesteps(argv[1], prefix) <= 0) {
+                fprintf(stderr, "Error: No valid plotfiles with prefix '%s' found in %s\n", prefix, argv[1]);
+                return 1;
+            }
+            current_timestep = 0;
+            strncpy(pf.plotfile_dir, timestep_paths[0], MAX_PATH - 1);
+            printf("Multi-timestep mode: %d timesteps found\n", n_timesteps);
+        }
+    }
+
+    /* SDM mode: particle histogram viewer */
+    if (sdm_mode) {
+        ParticleData pd = {0};
+        pd.current_metric = SDM_METRIC_PARTICLE_COUNT;
+
+        if (read_sdm_header(&pd, timestep_paths[current_timestep]) < 0) {
+            fprintf(stderr, "Error: Failed to read SDM header\n");
             return 1;
         }
-        current_timestep = 0;
-        strncpy(pf.plotfile_dir, timestep_paths[0], MAX_PATH - 1);
-        printf("Multi-timestep mode: %d timesteps found\n", n_timesteps);
+
+        pd.domain_volume = compute_domain_volume(timestep_paths[current_timestep]);
+
+        if (read_sdm_data(&pd, timestep_paths[current_timestep]) < 0) {
+            fprintf(stderr, "Error: Failed to read SDM data\n");
+            return 1;
+        }
+
+        init_sdm_gui(&pd, timestep_paths[current_timestep], argc, argv);
+        update_sdm_info_label(&pd, timestep_paths[current_timestep]);
+        render_sdm_histogram(&pd);
+
+        printf("\nSDM Mode Controls:\n");
+        printf("  Click metric buttons to change y-axis\n");
+        printf("  Click LogX/LogY to toggle log scale\n");
+        printf("  Click Settings to set cutoff radius and bin width\n");
+        if (n_timesteps > 1) {
+            printf("  Click </> or use Left/Right arrow keys to navigate timesteps\n");
+        }
+        printf("\n");
+
+        /* SDM event loop */
+        XtAppContext app_context = XtWidgetToApplicationContext(toplevel);
+        while (1) {
+            XEvent event;
+            XtAppNextEvent(app_context, &event);
+
+            if (event.type == Expose) {
+                if (event.xexpose.window == sdm_canvas && global_pd) {
+                    render_sdm_histogram(global_pd);
+                    if (!initial_focus_set) {
+                        XSetInputFocus(display, sdm_canvas, RevertToParent, CurrentTime);
+                        initial_focus_set = 1;
+                    }
+                }
+            } else if (event.type == KeyPress && global_pd) {
+                /* Handle keyboard input for SDM settings dialog */
+                if (sdm_dialog_active && sdm_active_text_widget) {
+                    char buf[32];
+                    KeySym keysym;
+                    int len = XLookupString(&event.xkey, buf, sizeof(buf) - 1, &keysym, NULL);
+
+                    String current_value;
+                    Arg kargs[1];
+                    XtSetArg(kargs[0], XtNstring, &current_value);
+                    XtGetValues(sdm_active_text_widget, kargs, 1);
+
+                    char new_value[256];
+                    strncpy(new_value, current_value ? current_value : "", sizeof(new_value) - 1);
+                    new_value[sizeof(new_value) - 1] = '\0';
+                    size_t current_len = strlen(new_value);
+
+                    if (keysym == XK_BackSpace || keysym == XK_Delete) {
+                        if (current_len > 0) {
+                            new_value[current_len - 1] = '\0';
+                            XtSetArg(kargs[0], XtNstring, new_value);
+                            XtSetValues(sdm_active_text_widget, kargs, 1);
+                        }
+                    } else if (keysym == XK_Tab) {
+                        /* Switch between cutoff and binwidth fields */
+                        if (sdm_active_field == 0 && sdm_settings_text_binwidth) {
+                            sdm_active_text_widget = sdm_settings_text_binwidth;
+                            sdm_active_field = 1;
+                        } else if (sdm_settings_text_cutoff) {
+                            sdm_active_text_widget = sdm_settings_text_cutoff;
+                            sdm_active_field = 0;
+                        }
+                    } else if (keysym == XK_Return || keysym == XK_KP_Enter) {
+                        sdm_settings_apply_callback(NULL, NULL, NULL);
+                    } else if (keysym == XK_Escape) {
+                        sdm_settings_close_callback(NULL, NULL, NULL);
+                    } else if (len > 0 && isprint((unsigned char)buf[0])) {
+                        if (current_len + (size_t)len < sizeof(new_value) - 1) {
+                            buf[len] = '\0';
+                            strcat(new_value, buf);
+                            XtSetArg(kargs[0], XtNstring, new_value);
+                            XtSetValues(sdm_active_text_widget, kargs, 1);
+                        }
+                    }
+                    continue;
+                }
+                if (event.xkey.window == sdm_canvas) {
+                    KeySym key = XLookupKeysym(&event.xkey, 0);
+                    if (key == XK_Right && n_timesteps > 1) {
+                        int new_ts = current_timestep + 1;
+                        if (new_ts >= n_timesteps) new_ts = 0;
+                        sdm_switch_timestep(global_pd, new_ts);
+                        update_time_label();
+                        continue;
+                    } else if (key == XK_Left && n_timesteps > 1) {
+                        int new_ts = current_timestep - 1;
+                        if (new_ts < 0) new_ts = n_timesteps - 1;
+                        sdm_switch_timestep(global_pd, new_ts);
+                        update_time_label();
+                        continue;
+                    }
+                }
+            }
+
+            XtDispatchEvent(&event);
+        }
+
+        /* Cleanup */
+        if (pd.radius) free(pd.radius);
+        if (pd.multiplicity) free(pd.multiplicity);
+        if (pd.mass) free(pd.mass);
+        if (sdm_hist_data) {
+            if (sdm_hist_data->bin_counts) free(sdm_hist_data->bin_counts);
+            if (sdm_hist_data->bin_centers) free(sdm_hist_data->bin_centers);
+            free(sdm_hist_data);
+        }
+        return 0;
     }
 
     if (read_header(&pf) < 0) return 1;

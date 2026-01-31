@@ -1,6 +1,6 @@
 # pltview
 
-A lightweight X11 viewer for AMReX plotfiles, inspired by ncview and built with the assistance of Claude.
+A lightweight X11 viewer for AMReX plotfiles, inspired by ncview and built with the assistance of Claude Code and Copilot.
 
 ![Example Screenshot](Example.png)
 
@@ -81,6 +81,23 @@ pltview /path/to/simulation/output plt2d
 
 **Multi-timestep mode** automatically scans the directory for plotfiles matching the specified prefix (default: `plt`), sorts them by numerical suffix, and allows navigation between timesteps using `<`/`>` buttons or Left/Right arrow keys.
 
+### SDM Mode (Super Droplet Method)
+
+```bash
+# Single plotfile
+pltview --sdm plt00100
+
+# Multi-timestep mode (auto-detects prefix)
+pltview --sdm /path/to/simulation/output
+
+# With explicit prefix
+pltview --sdm /path/to/simulation/output plt
+```
+
+SDM mode displays droplet size distribution histograms from AMReX particle data (`super_droplets_moisture` subdirectory). Features include selectable Y-axis metrics (particle count, SD count, concentration, mass, mean multiplicity), log X/Y scale toggles, configurable cutoff radius and bin width, and statistics (mean, std, skewness, kurtosis) in micrometers.
+
+**Note:** Reading multiple timesteps in SDM mode may cause noticeable lag due to the large volume of particle data being read from disk at each timestep switch.
+
 ## Controls
 
 **GUI Layout:**
@@ -88,10 +105,11 @@ pltview /path/to/simulation/output plt2d
 - **Left sidebar**: Variable selection buttons (all available variables, up to 128 supported)
 - **Main canvas**: Data visualization with white background and aspect ratio preservation
 - **Right colorbar**: Data range and colormap scale
-- **Bottom controls** (organized in columns):
-  - **Column 1**: Axis (X/Y/Z), Layer navigation (v/^), Jump, Profile
-  - **Column 2**: Colormap, Range, Distrib, and Time controls (`<`/`>`, Jump, Series) - Time controls appear only in multi-timestep mode
-  - **Column 3**: Level selection (Level 0/Level 1/...) - appears when multiple AMR levels detected
+- **Bottom controls** (organized in rows and columns):
+  - **Row 1, Column 1**: Axis (X/Y/Z), Layer navigation (v/^), Jump, Profile
+  - **Row 1, Column 2**: Colormap, Range, Distrib
+  - **Row 1, Column 3**: Level selection (Level 0/Level 1/...) - appears when multiple AMR levels detected
+  - **Row 2**: Time navigation (`<`/`>`, Jump, Series) - appears only in multi-timestep mode
 
 **Mouse Interaction:**
 
