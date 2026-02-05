@@ -25,7 +25,7 @@ A lightweight X11 viewer for AMReX plotfiles, inspired by ncview and built with 
 
 ## Installation
 
-### Via pip (Recommended; test one of the followins)
+### Via pip (Recommended)
 
 ```bash
 pip install git+https://github.com/wang1202/pltview.git
