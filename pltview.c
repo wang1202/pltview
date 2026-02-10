@@ -4230,8 +4230,10 @@ void render_quiver_overlay(PlotfileData *pf) {
             if (fabs(u) < 1e-10 && fabs(v) < 1e-10) continue;
             
             /* Convert data coordinates to screen coordinates */
+            /* Flip Y to match image rendering (higher j = higher physical Y = screen top) */
+            int flipped_j = height - 1 - j;
             int screen_x = render_offset_x + (int)((double)i * render_width / width);
-            int screen_y = render_offset_y + (int)((double)j * render_height / height);
+            int screen_y = render_offset_y + (int)((double)flipped_j * render_height / height);
             
             int arrow_dx = (int)(u * scale);
             int arrow_dy = (int)(-v * scale);  /* Flip Y to match screen coordinates */
