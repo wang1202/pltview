@@ -87,6 +87,8 @@ pltview /path/to/simulation/output plt2d
 
 ### SDM Mode (Super Droplet Method)
 
+![Example Screenshot](Example_SDM.png)
+
 ```bash
 # Single plotfile
 pltview --sdm plt00100
@@ -156,8 +158,6 @@ The popup window displays three graphs showing how the variable value changes al
   - Linux: libX11, libXt, libXaw, libXmu development packages
 - **Python**: >= 3.6 (for pip installation wrapper)
 
-**Runtime dependencies**: None beyond X11 (no Python runtime dependencies for the viewer itself)
-
 ## File Format
 
 This tool reads AMReX plotfile format (used by ERF, AMReX-Hydro, etc.):
@@ -175,10 +175,6 @@ This tool reads AMReX plotfile format (used by ERF, AMReX-Hydro, etc.):
 
 Each Cell_D file contains a FAB (Fortran Array Box) header followed by binary double-precision floating-point data in Fortran (column-major) order.
 
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
@@ -187,7 +183,7 @@ Additional government disclaimer - see [DISCLAIMER.md](DISCLAIMER.md).
 
 ## Citation
 
-If you use this package in your research, please consider citing:
+If you use this package in your research, please consider citing or acknowledging:
 
 ```bibtex
 @software{pltview,
