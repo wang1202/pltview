@@ -1,5 +1,4 @@
-# pltview: A simple viewer for AMReX plotfiles
-*(test version)*
+# pltview: A simple viewer for AMReX plotfiles (test version)
 
 A lightweight X11 viewer for AMReX plotfiles, inspired by ncview and built with the assistance of Claude Code and Copilot.
 
