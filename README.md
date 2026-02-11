@@ -1,6 +1,6 @@
 # pltview: A simple viewer for AMReX plotfiles (test version)
 
-A lightweight X11 viewer for AMReX plotfiles, inspired by ncview and built with the assistance of Claude Code and Copilot.
+A lightweight X11 viewer for AMReX plotfiles, inspired by ncview and built with the assistance of Claude Code and Copilot. This is mainly designed for Energy Research and Forecasting (ERF), but it may also be used for plt file output from other models.
 
 ![Example Screenshot](Example.png)
 
