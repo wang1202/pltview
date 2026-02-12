@@ -191,6 +191,16 @@ This tool reads AMReX plotfile format (used by ERF, AMReX-Hydro, etc.):
 
 Each Cell_D file contains a FAB (Fortran Array Box) header followed by binary double-precision floating-point data in Fortran (column-major) order.
 
+## Changelog
+
+### v0.2.0
+- **Multi-level AMR overlay**: Overlay higher refinement levels on top of coarser levels for composite visualization
+- **Fix zero-value filling**: Resolved issue where gaps between AMR boxes were incorrectly filled with zeros
+- **Fix pip install from git**: Compiled binary is now properly bundled in the wheel, so `pip install git+...` works correctly
+
+### v0.1.0
+- Initial release with multi-level AMR support, multi-timestep navigation, interactive 3D slicing, quiver plots, SDM mode, and statistical analysis
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
