@@ -252,6 +252,8 @@ void distribution_button_callback(Widget w, XtPointer client_data, XtPointer cal
 void show_distribution(PlotfileData *pf);
 void quiver_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void show_quiver_dialog(PlotfileData *pf);
+int find_variable_index(PlotfileData *pf, const char *name);
+void get_default_quiver_components(PlotfileData *pf, char *x_comp, char *y_comp);
 void quiver_apply_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void quiver_close_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void quiver_remove_callback(Widget w, XtPointer client_data, XtPointer call_data);
@@ -2277,7 +2279,20 @@ void axis_button_callback(Widget w, XtPointer client_data, XtPointer call_data) 
     if (global_pf) {
         global_pf->slice_axis = axis;
         global_pf->slice_idx = 0;  /* Start at first layer */
-        
+
+        /* Update quiver components to match new axis */
+        if (quiver_data.enabled) {
+            char default_x[64], default_y[64];
+            get_default_quiver_components(global_pf, default_x, default_y);
+            quiver_data.x_comp_index = find_variable_index(global_pf, default_x);
+            quiver_data.y_comp_index = find_variable_index(global_pf, default_y);
+            /* Update dialog labels if dialog is open */
+            if (quiver_data.x_comp_text && quiver_data.x_comp_index >= 0)
+                XtVaSetValues(quiver_data.x_comp_text, XtNlabel, global_pf->variables[quiver_data.x_comp_index], NULL);
+            if (quiver_data.y_comp_text && quiver_data.y_comp_index >= 0)
+                XtVaSetValues(quiver_data.y_comp_text, XtNlabel, global_pf->variables[quiver_data.y_comp_index], NULL);
+        }
+
         update_layer_label(global_pf);
         update_info_label(global_pf);
         render_slice(global_pf);
