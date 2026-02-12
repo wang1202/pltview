@@ -9,7 +9,7 @@ pltview is a lightweight X11 viewer for AMReX plotfiles written primarily in C w
 ## Architecture
 
 ### Core Components
-- **pltview.c**: Main C application (~5000+ lines) containing all visualization logic, X11/Athena widget GUI, AMReX plotfile parsing, and data rendering
+- **pltview.c**: Single-file C application (~6400 lines, no header files) containing all visualization logic, X11/Athena widget GUI, AMReX plotfile parsing, and data rendering
 - **pltview_entry.py**: Python wrapper script that locates and executes the compiled C binary
 - **setup.py**: Custom setuptools build system that compiles the C binary during installation
 
@@ -28,26 +28,17 @@ pltview is a lightweight X11 viewer for AMReX plotfiles written primarily in C w
 
 ## Development Commands
 
-### Building from Source
+### Building
 ```bash
-# Compile C binary directly
+# Quick compile during development (produces ./pltview_c)
 make
 
-# Build via Python setuptools (used during pip install)
-python setup.py build
-```
-
-### Installation Methods
-```bash
-# Editable development install (recommended for development)
+# Editable development install (recommended — produces ./pltview, wired to `pltview` CLI command)
 pip install -e .
-
-# Regular install from source
-pip install .
-
-# Install from GitHub
-pip install git+https://github.com/wang1202/pltview.git
 ```
+
+### Testing
+There is no test suite. Verify changes manually by running `pltview` against AMReX plotfile directories.
 
 ### Running the Application
 ```bash
@@ -100,6 +91,8 @@ Reads AMReX plotfile format:
 - Memory management for large multi-timestep datasets
 
 ### Build System Details
-- Custom setuptools commands automatically detect X11 paths
-- Makefile builds target `pltview_c` (different from setup.py which builds `pltview`)
-- Editable installs maintain source directory binary for immediate development feedback
+- `make` produces `pltview_c`; `pip install -e .` produces `pltview` — both from pltview.c but with different output names
+- Custom setuptools commands (BuildC, InstallC, DevelopC, EditableWheel in setup.py) detect X11 paths automatically
+- After `pip install -e .`, recompile with `make` or re-run `pip install -e .` to pick up C code changes
+- Compiler flags: `-O3 -Wall -march=native`; linked against `-lX11 -lXt -lXaw -lXmu -lm`
+- macOS requires XQuartz; include/lib paths at `/opt/X11/`

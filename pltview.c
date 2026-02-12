@@ -2927,8 +2927,37 @@ void render_slice(PlotfileData *pf) {
     slice_width = width;
     slice_height = height;
 
-    /* Find data min/max */
+    /* Build mask for cells inside actual boxes (needed when level has
+     * non-contiguous boxes with zero-filled gaps in between) */
+    unsigned char *base_in_box = NULL;
+    if (pf->current_level > 0 && pf->n_boxes > 1) {
+        base_in_box = (unsigned char *)calloc(width * height, 1);
+        int base_slice_coord = pf->slice_idx + pf->level_lo[pf->slice_axis];
+        for (int bi = 0; bi < pf->n_boxes; bi++) {
+            Box *box = &pf->boxes[bi];
+            if (base_slice_coord < box->lo[pf->slice_axis] || base_slice_coord > box->hi[pf->slice_axis])
+                continue;
+            int dim_x, dim_y;
+            if (pf->slice_axis == 2) { dim_x = 0; dim_y = 1; }
+            else if (pf->slice_axis == 1) { dim_x = 0; dim_y = 2; }
+            else { dim_x = 1; dim_y = 2; }
+            int mi_lo = box->lo[dim_x] - pf->level_lo[dim_x];
+            int mi_hi = box->hi[dim_x] - pf->level_lo[dim_x];
+            int mj_lo = box->lo[dim_y] - pf->level_lo[dim_y];
+            int mj_hi = box->hi[dim_y] - pf->level_lo[dim_y];
+            if (mi_lo < 0) mi_lo = 0;
+            if (mj_lo < 0) mj_lo = 0;
+            if (mi_hi >= width) mi_hi = width - 1;
+            if (mj_hi >= height) mj_hi = height - 1;
+            for (int mj = mj_lo; mj <= mj_hi; mj++)
+                for (int mi = mi_lo; mi <= mi_hi; mi++)
+                    base_in_box[mj * width + mi] = 1;
+        }
+    }
+
+    /* Find data min/max, skipping gap cells when mask is active */
     for (i = 0; i < width * height; i++) {
+        if (base_in_box && !base_in_box[i]) continue;
         if (slice[i] < vmin) vmin = slice[i];
         if (slice[i] > vmax) vmax = slice[i];
     }
@@ -2994,10 +3023,36 @@ void render_slice(PlotfileData *pf) {
             double *lev_slice = (double *)malloc(lw * lh * sizeof(double));
             extract_slice_level(ld, lev_slice, pf->slice_axis, lev_slice_idx);
 
+            /* Build mask so we only consider cells inside actual boxes, not zero-filled gaps */
+            unsigned char *mm_in_box = (unsigned char *)calloc(lw * lh, 1);
+            int mm_slice_coord = lev_slice_idx + ld->level_lo[pf->slice_axis];
+            for (int bi = 0; bi < ld->n_boxes; bi++) {
+                Box *box = &ld->boxes[bi];
+                if (mm_slice_coord < box->lo[pf->slice_axis] || mm_slice_coord > box->hi[pf->slice_axis])
+                    continue;
+                int dim_x, dim_y;
+                if (pf->slice_axis == 2) { dim_x = 0; dim_y = 1; }
+                else if (pf->slice_axis == 1) { dim_x = 0; dim_y = 2; }
+                else { dim_x = 1; dim_y = 2; }
+                int mi_lo = box->lo[dim_x] - ld->level_lo[dim_x];
+                int mi_hi = box->hi[dim_x] - ld->level_lo[dim_x];
+                int mj_lo = box->lo[dim_y] - ld->level_lo[dim_y];
+                int mj_hi = box->hi[dim_y] - ld->level_lo[dim_y];
+                if (mi_lo < 0) mi_lo = 0;
+                if (mj_lo < 0) mj_lo = 0;
+                if (mi_hi >= lw) mi_hi = lw - 1;
+                if (mj_hi >= lh) mj_hi = lh - 1;
+                for (int mj = mj_lo; mj <= mj_hi; mj++)
+                    for (int mi = mi_lo; mi <= mi_hi; mi++)
+                        mm_in_box[mj * lw + mi] = 1;
+            }
+
             for (int j = 0; j < lw * lh; j++) {
+                if (!mm_in_box[j]) continue;
                 if (lev_slice[j] < vmin) vmin = lev_slice[j];
                 if (lev_slice[j] > vmax) vmax = lev_slice[j];
             }
+            free(mm_in_box);
             free(lev_slice);
         }
     }
@@ -3056,6 +3111,8 @@ void render_slice(PlotfileData *pf) {
 
     for (int j = 0; j < height; j++) {
         for (int i = 0; i < width; i++) {
+            if (base_in_box && !base_in_box[j * width + i]) continue;
+
             unsigned long pixel = pixel_data[j * width + i];
             XSetForeground(display, gc, pixel);
 
@@ -3192,6 +3249,37 @@ void render_slice(PlotfileData *pf) {
             double *level_slice = (double *)malloc(lwidth * lheight * sizeof(double));
             extract_slice_level(ld, level_slice, pf->slice_axis, level_slice_idx);
 
+            /* Build mask: only render cells that fall inside an actual box.
+             * Gaps between non-contiguous boxes are left unmasked (0) so the
+             * underlying coarser level shows through. */
+            unsigned char *in_box = (unsigned char *)calloc(lwidth * lheight, 1);
+            int slice_coord = level_slice_idx + ld->level_lo[pf->slice_axis];
+            for (int bi = 0; bi < ld->n_boxes; bi++) {
+                Box *box = &ld->boxes[bi];
+                /* Check if this box intersects the current slice */
+                if (slice_coord < box->lo[pf->slice_axis] || slice_coord > box->hi[pf->slice_axis])
+                    continue;
+                /* Determine the 2D range this box covers in the slice plane */
+                int dim_x, dim_y;  /* which 3D dims map to li, lj */
+                if (pf->slice_axis == 2) { dim_x = 0; dim_y = 1; }
+                else if (pf->slice_axis == 1) { dim_x = 0; dim_y = 2; }
+                else { dim_x = 1; dim_y = 2; }
+                int li_lo = box->lo[dim_x] - ld->level_lo[dim_x];
+                int li_hi = box->hi[dim_x] - ld->level_lo[dim_x];
+                int lj_lo = box->lo[dim_y] - ld->level_lo[dim_y];
+                int lj_hi = box->hi[dim_y] - ld->level_lo[dim_y];
+                /* Clamp to grid bounds */
+                if (li_lo < 0) li_lo = 0;
+                if (lj_lo < 0) lj_lo = 0;
+                if (li_hi >= lwidth) li_hi = lwidth - 1;
+                if (lj_hi >= lheight) lj_hi = lheight - 1;
+                for (int mj = lj_lo; mj <= lj_hi; mj++) {
+                    for (int mi = li_lo; mi <= li_hi; mi++) {
+                        in_box[mj * lwidth + mi] = 1;
+                    }
+                }
+            }
+
             /* Apply colormap to level slice */
             unsigned long *level_pixels = (unsigned long *)malloc(lwidth * lheight * sizeof(unsigned long));
             apply_colormap(level_slice, lwidth, lheight, level_pixels, display_vmin, display_vmax, pf->colormap);
@@ -3210,9 +3298,11 @@ void render_slice(PlotfileData *pf) {
             double lpixel_width = (double)(screen_x1 - screen_x0) / lwidth;
             double lpixel_height = (double)(screen_y1 - screen_y0) / lheight;
 
-            /* Draw level pixels */
+            /* Draw level pixels, skipping cells not inside any box */
             for (int lj = 0; lj < lheight; lj++) {
                 for (int li = 0; li < lwidth; li++) {
+                    if (!in_box[lj * lwidth + li]) continue;
+
                     unsigned long pixel = level_pixels[lj * lwidth + li];
                     XSetForeground(display, gc, pixel);
 
@@ -3228,10 +3318,32 @@ void render_slice(PlotfileData *pf) {
                 }
             }
 
-            /* Draw box outline for this level (optional - helps visualize refined regions) */
+            /* Draw box outlines for each actual box at this level */
             XSetForeground(display, gc, 0xFF0000);  /* Red */
-            XDrawRectangle(display, canvas, gc, screen_x0, screen_y0,
-                           screen_x1 - screen_x0, screen_y1 - screen_y0);
+            for (int bi = 0; bi < ld->n_boxes; bi++) {
+                Box *box = &ld->boxes[bi];
+                if (slice_coord < box->lo[pf->slice_axis] || slice_coord > box->hi[pf->slice_axis])
+                    continue;
+                int dim_x, dim_y;
+                if (pf->slice_axis == 2) { dim_x = 0; dim_y = 1; }
+                else if (pf->slice_axis == 1) { dim_x = 0; dim_y = 2; }
+                else { dim_x = 1; dim_y = 2; }
+                double box_x_lo = pf->prob_lo[dim_x] + box->lo[dim_x] * dx_level[dim_x];
+                double box_x_hi = pf->prob_lo[dim_x] + (box->hi[dim_x] + 1) * dx_level[dim_x];
+                double box_y_lo = pf->prob_lo[dim_y] + box->lo[dim_y] * dx_level[dim_y];
+                double box_y_hi = pf->prob_lo[dim_y] + (box->hi[dim_y] + 1) * dx_level[dim_y];
+                double bfx_lo = (box_x_lo - phys_xmin) / (phys_xmax - phys_xmin);
+                double bfx_hi = (box_x_hi - phys_xmin) / (phys_xmax - phys_xmin);
+                double bfy_lo = (box_y_lo - phys_ymin) / (phys_ymax - phys_ymin);
+                double bfy_hi = (box_y_hi - phys_ymin) / (phys_ymax - phys_ymin);
+                int bsx0 = offset_x + (int)(bfx_lo * render_width);
+                int bsx1 = offset_x + (int)(bfx_hi * render_width);
+                int bsy0 = offset_y + render_height - (int)(bfy_hi * render_height);
+                int bsy1 = offset_y + render_height - (int)(bfy_lo * render_height);
+                XDrawRectangle(display, canvas, gc, bsx0, bsy0, bsx1 - bsx0, bsy1 - bsy0);
+            }
+
+            free(in_box);
 
             free(level_slice);
             free(level_pixels);
@@ -3328,6 +3440,7 @@ void render_slice(PlotfileData *pf) {
            pf->grid_dims[pf->slice_axis], vmin, vmax);
     
     free(slice);
+    if (base_in_box) free(base_in_box);
 }
 
 /* Mouse motion handler - show value at cursor */
