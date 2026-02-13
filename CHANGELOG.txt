@@ -1,6 +1,10 @@
 Changelog
 =========
 
+v0.3.1
+------
+- Fix quiver overlay alignment when map mode is enabled
+
 v0.3.0
 ------
 - Map mode UI: Map properties popup with color controls and layer toggles

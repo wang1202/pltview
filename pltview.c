@@ -7278,6 +7278,53 @@ void render_quiver_overlay(PlotfileData *pf) {
     
     extract_slice_from_data(x_comp_data, pf, x_slice, pf->slice_axis, pf->slice_idx);
     extract_slice_from_data(y_comp_data, pf, y_slice, pf->slice_axis, pf->slice_idx);
+
+    /* Map coordinates when map mode is enabled */
+    int use_map_coords = 0;
+    double *x_coord_slice = NULL;
+    double *y_coord_slice = NULL;
+    if (pf->map_mode && map_has_bounds) {
+        int lon_idx = find_variable_index(pf, "lon_m");
+        int lat_idx = find_variable_index(pf, "lat_m");
+        if (lon_idx >= 0 && lat_idx >= 0) {
+            x_coord_slice = (double *)malloc(width * height * sizeof(double));
+            y_coord_slice = (double *)malloc(width * height * sizeof(double));
+
+            if (pf->slice_axis == 2) {
+                /* Z-slice: lon/lat */
+                read_variable_data(pf, lon_idx);
+                extract_slice_from_data(pf->data, pf, x_coord_slice, pf->slice_axis, pf->slice_idx);
+                read_variable_data(pf, lat_idx);
+                extract_slice_from_data(pf->data, pf, y_coord_slice, pf->slice_axis, pf->slice_idx);
+            } else if (pf->slice_axis == 1) {
+                /* Y-slice: lon vs Z */
+                read_variable_data(pf, lon_idx);
+                extract_slice_from_data(pf->data, pf, x_coord_slice, pf->slice_axis, pf->slice_idx);
+                for (int jj = 0; jj < height; jj++) {
+                    for (int ii = 0; ii < width; ii++) {
+                        int idx = jj * width + ii;
+                        double z_coord = pf->prob_lo[2] + (jj + 0.5) * (pf->prob_hi[2] - pf->prob_lo[2]) / pf->grid_dims[2];
+                        y_coord_slice[idx] = z_coord;
+                    }
+                }
+            } else {
+                /* X-slice: lat vs Z */
+                read_variable_data(pf, lat_idx);
+                extract_slice_from_data(pf->data, pf, x_coord_slice, pf->slice_axis, pf->slice_idx);
+                for (int jj = 0; jj < height; jj++) {
+                    for (int ii = 0; ii < width; ii++) {
+                        int idx = jj * width + ii;
+                        double z_coord = pf->prob_lo[2] + (jj + 0.5) * (pf->prob_hi[2] - pf->prob_lo[2]) / pf->grid_dims[2];
+                        y_coord_slice[idx] = z_coord;
+                    }
+                }
+            }
+
+            /* Restore current variable */
+            read_variable_data(pf, saved_var);
+            use_map_coords = 1;
+        }
+    }
     
     /* Find max magnitude for scaling */
     double max_mag = 0.0;
@@ -7327,11 +7374,25 @@ void render_quiver_overlay(PlotfileData *pf) {
             
             if (fabs(u) < 1e-10 && fabs(v) < 1e-10) continue;
             
-            /* Convert data coordinates to screen coordinates */
-            /* Flip Y to match image rendering (higher j = higher physical Y = screen top) */
-            int flipped_j = height - 1 - j;
-            int screen_x = render_offset_x + (int)((double)i * render_width / width);
-            int screen_y = render_offset_y + (int)((double)flipped_j * render_height / height);
+            int screen_x, screen_y;
+            if (use_map_coords) {
+                double x_coord = x_coord_slice[idx];
+                double y_coord = y_coord_slice[idx];
+                if (x_coord < map_last_lon_min || x_coord > map_last_lon_max ||
+                    y_coord < map_last_lat_min || y_coord > map_last_lat_max) {
+                    continue;
+                }
+                screen_x = render_offset_x + (int)((x_coord - map_last_lon_min) /
+                                                  (map_last_lon_max - map_last_lon_min) * render_width);
+                screen_y = render_offset_y + (int)((map_last_lat_max - y_coord) /
+                                                  (map_last_lat_max - map_last_lat_min) * render_height);
+            } else {
+                /* Convert data coordinates to screen coordinates */
+                /* Flip Y to match image rendering (higher j = higher physical Y = screen top) */
+                int flipped_j = height - 1 - j;
+                screen_x = render_offset_x + (int)((double)i * render_width / width);
+                screen_y = render_offset_y + (int)((double)flipped_j * render_height / height);
+            }
             
             int arrow_dx = (int)(u * scale);
             int arrow_dy = (int)(-v * scale);  /* Flip Y to match screen coordinates */
@@ -7346,6 +7407,8 @@ void render_quiver_overlay(PlotfileData *pf) {
     free(y_comp_data);
     free(x_slice);
     free(y_slice);
+    if (x_coord_slice) free(x_coord_slice);
+    if (y_coord_slice) free(y_coord_slice);
 }
 
 /* Render map overlay with US coastline */
