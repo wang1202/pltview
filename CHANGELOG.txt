@@ -1,6 +1,12 @@
 Changelog
 =========
 
+v0.3.0
+------
+- Map mode UI: Map properties popup with color controls and layer toggles
+- Map layers: load overlays from map_layers/*.json with auto-detection by bounds
+- Map behavior: keep lat/lon axes when removing layers; improved overlay rendering
+
 v0.2.1
 ------
 - Fix quiver components not updating when switching slice axis (e.g., Z to Y) while quiver is enabled

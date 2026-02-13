@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pltview"
-version = "0.2.1"
+version = "0.3.0"
 description = "Ultra-fast C viewer for AMReX plotfiles, inspired by ncview"
 readme = "README.md"
 requires-python = ">=3.6"
