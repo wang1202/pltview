@@ -7375,6 +7375,7 @@ void render_quiver_overlay(PlotfileData *pf) {
             if (fabs(u) < 1e-10 && fabs(v) < 1e-10) continue;
             
             int screen_x, screen_y;
+            int arrow_dx, arrow_dy;
             if (use_map_coords) {
                 double x_coord = x_coord_slice[idx];
                 double y_coord = y_coord_slice[idx];
@@ -7386,16 +7387,71 @@ void render_quiver_overlay(PlotfileData *pf) {
                                                   (map_last_lon_max - map_last_lon_min) * render_width);
                 screen_y = render_offset_y + (int)((map_last_lat_max - y_coord) /
                                                   (map_last_lat_max - map_last_lat_min) * render_height);
+
+                int i_prev = (i > 0) ? i - 1 : i;
+                int i_next = (i + 1 < width) ? i + 1 : i;
+                int j_prev = (j > 0) ? j - 1 : j;
+                int j_next = (j + 1 < height) ? j + 1 : j;
+                if (i_prev == i_next || j_prev == j_next) continue;
+
+                int idx_i_prev = j * width + i_prev;
+                int idx_i_next = j * width + i_next;
+                int idx_j_prev = j_prev * width + i;
+                int idx_j_next = j_next * width + i;
+
+                double xi_prev = x_coord_slice[idx_i_prev];
+                double yi_prev = y_coord_slice[idx_i_prev];
+                double xi_next = x_coord_slice[idx_i_next];
+                double yi_next = y_coord_slice[idx_i_next];
+                double xj_prev = x_coord_slice[idx_j_prev];
+                double yj_prev = y_coord_slice[idx_j_prev];
+                double xj_next = x_coord_slice[idx_j_next];
+                double yj_next = y_coord_slice[idx_j_next];
+
+                int sx_i_prev = render_offset_x + (int)((xi_prev - map_last_lon_min) /
+                                                       (map_last_lon_max - map_last_lon_min) * render_width);
+                int sy_i_prev = render_offset_y + (int)((map_last_lat_max - yi_prev) /
+                                                       (map_last_lat_max - map_last_lat_min) * render_height);
+                int sx_i_next = render_offset_x + (int)((xi_next - map_last_lon_min) /
+                                                       (map_last_lon_max - map_last_lon_min) * render_width);
+                int sy_i_next = render_offset_y + (int)((map_last_lat_max - yi_next) /
+                                                       (map_last_lat_max - map_last_lat_min) * render_height);
+
+                int sx_j_prev = render_offset_x + (int)((xj_prev - map_last_lon_min) /
+                                                       (map_last_lon_max - map_last_lon_min) * render_width);
+                int sy_j_prev = render_offset_y + (int)((map_last_lat_max - yj_prev) /
+                                                       (map_last_lat_max - map_last_lat_min) * render_height);
+                int sx_j_next = render_offset_x + (int)((xj_next - map_last_lon_min) /
+                                                       (map_last_lon_max - map_last_lon_min) * render_width);
+                int sy_j_next = render_offset_y + (int)((map_last_lat_max - yj_next) /
+                                                       (map_last_lat_max - map_last_lat_min) * render_height);
+
+                double basis_ix = 0.5 * (sx_i_next - sx_i_prev);
+                double basis_iy = 0.5 * (sy_i_next - sy_i_prev);
+                double basis_jx = 0.5 * (sx_j_next - sx_j_prev);
+                double basis_jy = 0.5 * (sy_j_next - sy_j_prev);
+
+                double mag_i = sqrt(basis_ix * basis_ix + basis_iy * basis_iy);
+                double mag_j = sqrt(basis_jx * basis_jx + basis_jy * basis_jy);
+                if (mag_i < 1e-6 || mag_j < 1e-6) continue;
+
+                basis_ix /= mag_i;
+                basis_iy /= mag_i;
+                basis_jx /= mag_j;
+                basis_jy /= mag_j;
+
+                arrow_dx = (int)(scale * (u * basis_ix + v * basis_jx));
+                arrow_dy = (int)(scale * (u * basis_iy + v * basis_jy));
             } else {
                 /* Convert data coordinates to screen coordinates */
                 /* Flip Y to match image rendering (higher j = higher physical Y = screen top) */
                 int flipped_j = height - 1 - j;
                 screen_x = render_offset_x + (int)((double)i * render_width / width);
                 screen_y = render_offset_y + (int)((double)flipped_j * render_height / height);
+
+                arrow_dx = (int)(u * scale);
+                arrow_dy = (int)(-v * scale);  /* Flip Y to match screen coordinates */
             }
-            
-            int arrow_dx = (int)(u * scale);
-            int arrow_dy = (int)(-v * scale);  /* Flip Y to match screen coordinates */
             
             draw_arrow(display, canvas, gc, screen_x, screen_y, 
                       screen_x + arrow_dx, screen_y + arrow_dy);

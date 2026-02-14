@@ -1,9 +1,10 @@
 Changelog
 =========
 
-v0.3.1
+v0.3.2
 ------
 - Fix quiver overlay alignment when map mode is enabled
+- Fix quiver angle
 
 v0.3.0
 ------
