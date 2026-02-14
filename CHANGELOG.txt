@@ -1,6 +1,11 @@
 Changelog
 =========
 
+v0.3.3
+------
+- Map overlay now relies only on GeoJSON layers (removed US coastline fallback)
+- Fix Range dialog text input focus and cursor behavior
+
 v0.3.2
 ------
 - Fix quiver overlay alignment when map mode is enabled
