@@ -3116,17 +3116,38 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
     XtAddRawEventHandler(canvas_widget, ButtonReleaseMask, False, canvas_button_release_handler, NULL);
 }
 
+static void get_plotfile_basename(const char *path, char *name, size_t name_size) {
+    if (!name || name_size == 0) return;
+    name[0] = '\0';
+    if (!path || !path[0]) {
+        snprintf(name, name_size, "unknown");
+        return;
+    }
+
+    size_t end = strlen(path);
+    while (end > 1 && path[end - 1] == '/') end--;
+    size_t start = end;
+    while (start > 0 && path[start - 1] != '/') start--;
+    size_t length = end - start;
+    if (length >= name_size) length = name_size - 1;
+    memcpy(name, path + start, length);
+    name[length] = '\0';
+}
+
 /* Update info label */
 void update_info_label(PlotfileData *pf) {
     char text[512];
+    char plotfile_name[128];
     const char *axis_names[] = {"X", "Y", "Z"};
     int max_idx = pf->grid_dims[pf->slice_axis];
+    get_plotfile_basename(pf->plotfile_dir, plotfile_name, sizeof(plotfile_name));
     
     if (hover_value_text[0] != '\0') {
         if (pf->n_levels > 1) {
             snprintf(text, sizeof(text), 
-                     "%s | Level: %d | Axis: %s | Layer: %d/%d | Time: %.3f | %s",
+                     "%s | File: %s | Level: %d | Axis: %s | Layer: %d/%d | Time: %.3f | %s",
                      pf->variables[pf->current_var],
+                     plotfile_name,
                      pf->current_level,
                      axis_names[pf->slice_axis],
                      pf->slice_idx + 1, max_idx,
@@ -3134,8 +3155,9 @@ void update_info_label(PlotfileData *pf) {
                      hover_value_text);
         } else {
             snprintf(text, sizeof(text), 
-                     "%s | Axis: %s | Layer: %d/%d | Time: %.3f | %s",
+                     "%s | File: %s | Axis: %s | Layer: %d/%d | Time: %.3f | %s",
                      pf->variables[pf->current_var],
+                     plotfile_name,
                      axis_names[pf->slice_axis],
                      pf->slice_idx + 1, max_idx,
                      pf->time,
@@ -3144,16 +3166,18 @@ void update_info_label(PlotfileData *pf) {
     } else {
         if (pf->n_levels > 1) {
             snprintf(text, sizeof(text), 
-                     "%s | Level: %d | Axis: %s | Layer: %d/%d | Time: %.3f",
+                     "%s | File: %s | Level: %d | Axis: %s | Layer: %d/%d | Time: %.3f",
                      pf->variables[pf->current_var],
+                     plotfile_name,
                      pf->current_level,
                      axis_names[pf->slice_axis],
                      pf->slice_idx + 1, max_idx,
                      pf->time);
         } else {
             snprintf(text, sizeof(text), 
-                     "%s | Axis: %s | Layer: %d/%d | Time: %.3f",
+                     "%s | File: %s | Axis: %s | Layer: %d/%d | Time: %.3f",
                      pf->variables[pf->current_var],
+                     plotfile_name,
                      axis_names[pf->slice_axis],
                      pf->slice_idx + 1, max_idx,
                      pf->time);
