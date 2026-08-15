@@ -10,6 +10,9 @@
 #include <dirent.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <errno.h>
 #include <math.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -35,6 +38,9 @@
 #define MAX_LINE 1024
 #define MAX_TIMESTEPS 1024
 #define MAX_LEVELS 10
+#define VIDEO_FRAME_WIDTH 1000
+#define VIDEO_FRAME_HEIGHT 700
+#define VIDEO_CACHE_LIMIT ((size_t)2 * 1024 * 1024 * 1024)
 
 /* Data structures */
 typedef struct {
@@ -52,7 +58,9 @@ typedef struct {
     Box boxes[MAX_BOXES];   /* Box definitions for this level */
     int n_boxes;            /* Number of boxes at this level */
     double *data;           /* Variable data for this level */
+    double *z_phys_data;    /* Cached physical Z coordinate for terrain-following grids */
     int loaded;             /* Flag: 1 if data is loaded, 0 otherwise */
+    int z_phys_loaded;      /* Flag: 1 if z_phys_data is loaded */
 } LevelData;
 
 typedef struct {
@@ -80,7 +88,36 @@ typedef struct {
     int ref_ratio[MAX_LEVELS];     /* Refinement ratio between levels */
     int overlay_mode;              /* 0=single level, 1=overlay all levels */
     int map_mode;                  /* 0=normal view, 1=longitude-latitude map view */
+    int use_z_phys;                /* Use 3D z_phys for X/Y-slice vertical coordinates */
+    double *z_phys_data;           /* Cached z_phys data for the current level */
+    int z_phys_level;              /* Level represented by z_phys_data */
 } PlotfileData;
+
+typedef struct {
+    unsigned char *rgb;
+    double time;
+    int timestep_number;
+} VideoFrame;
+
+typedef struct VideoState {
+    Widget shell, canvas_widget, status_label, frame_label, scrubber;
+    Widget fps_text, play_button, stop_button, save_button;
+    Window canvas;
+    Pixmap frame_pixmap;
+    GC gc;
+    XImage *display_image;
+    unsigned char *display_rgb;
+    VideoFrame *frames;
+    int n_frames, current_frame, frame_width, frame_height;
+    double global_vmin, global_vmax, fps;
+    int loading, playing, closing, load_phase, load_index;
+    XtWorkProcId work_id;
+    XtIntervalId timer_id;
+    char variable_name[64];
+    int slice_axis, requested_level, overlay_mode, map_mode, colormap, scale_mode;
+    double slice_position;
+    Widget save_shell, save_text;
+} VideoState;
 
 /* Colormap */
 typedef struct {
@@ -222,9 +259,12 @@ double current_vmin = 0, current_vmax = 1;
 
 /* Current slice rendering info for mouse interaction */
 double *current_slice_data = NULL;
+double *current_z_phys_slice = NULL;
 int slice_width = 0, slice_height = 0;
 int render_offset_x = 0, render_offset_y = 0;
 int render_width = 0, render_height = 0;
+double render_phys_ymin = 0.0, render_phys_ymax = 1.0;
+int render_uses_z_phys = 0;
 char hover_value_text[256] = "";
 
 /* Zoom and scroll state */
@@ -257,6 +297,7 @@ int n_timesteps = 0;                   /* Number of timesteps found */
 int current_timestep = 0;              /* Current timestep index */
 int max_levels_all_timesteps = 1;      /* Max levels across all timesteps */
 Widget time_label = NULL;              /* Time step display label */
+static VideoState *active_video = NULL;
 
 /* Data structure for histogram expose handler (forward declaration for SDM) */
 typedef struct {
@@ -383,6 +424,8 @@ void render_slice(PlotfileData *pf);
 void update_info_label(PlotfileData *pf);
 void var_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void axis_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
+void z_phys_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
+void update_z_phys_button(PlotfileData *pf);
 void map_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void show_map_settings_dialog(PlotfileData *pf);
 void show_map_unavailable_dialog(const char *message);
@@ -425,6 +468,18 @@ void variable_selector_close_callback(Widget w, XtPointer client_data, XtPointer
 void render_quiver_overlay(PlotfileData *pf);
 void draw_arrow(Display *dpy, Drawable win, GC graphics_gc, int x1, int y1, int x2, int y2);
 void extract_slice_from_data(double *data, PlotfileData *pf, double *slice, int axis, int idx);
+int ensure_z_phys_data(PlotfileData *pf);
+int ensure_z_phys_level_data(PlotfileData *pf, int level);
+void free_z_phys_cache(PlotfileData *pf);
+double z_phys_corner(const double *z_values, int width, int height,
+                     int x_boundary, int z_boundary);
+void draw_z_phys_cells(const double *z_values, const unsigned long *pixels,
+                       const unsigned char *mask, int width, int height,
+                       double data_xmin, double data_xmax,
+                       double view_xmin, double view_xmax,
+                       double view_ymin, double view_ymax,
+                       int offset_x, int offset_y, int draw_width, int draw_height);
+int canvas_to_data_indices(int mouse_x, int mouse_y, int *data_x, int *data_y);
 void update_layer_label(PlotfileData *pf);
 void canvas_expose_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void canvas_motion_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_dispatch);
@@ -444,6 +499,17 @@ void update_time_label(void);
 void time_jump_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void time_series_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void show_time_series(PlotfileData *pf);
+void video_button_callback(Widget w, XtPointer client_data, XtPointer call_data);
+static Boolean video_load_workproc(XtPointer client_data);
+static void video_expose_callback(Widget w, XtPointer client_data, XtPointer call_data);
+static void video_play_callback(Widget w, XtPointer client_data, XtPointer call_data);
+static void video_stop_callback(Widget w, XtPointer client_data, XtPointer call_data);
+static void video_scrub_callback(Widget w, XtPointer client_data, XtPointer call_data);
+static void video_timer_callback(XtPointer client_data, XtIntervalId *id);
+static void video_close_callback(Widget w, XtPointer client_data, XtPointer call_data);
+static void video_save_callback(Widget w, XtPointer client_data, XtPointer call_data);
+static void video_save_gif_callback(Widget w, XtPointer client_data, XtPointer call_data);
+static void video_save_mp4_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void show_time_height_contour(PlotfileData *pf);
 void profile_fmt_val(char *buf, int bufsz, double v);
 static void time_height_contour_callback(Widget w, XtPointer client_data, XtPointer call_data);
@@ -512,6 +578,7 @@ void profile_rebuild_var_buttons(ProfileData *pd);
 /* Global pointer for callbacks */
 PlotfileData *global_pf = NULL;
 Widget map_button_widget = NULL;
+Widget z_phys_button_widget = NULL;
 
 /* Quiver state and dialog widgets */
 typedef struct {
@@ -1016,6 +1083,7 @@ void switch_timestep(PlotfileData *pf, int new_timestep) {
 
     /* Always free old overlay data before reading new timestep */
     free_all_levels(pf);
+    free_z_phys_cache(pf);
 
     /* Save overlay_mode and map_mode before read_header (which resets them) */
     int saved_overlay_mode = pf->overlay_mode;
@@ -1060,6 +1128,7 @@ void switch_timestep(PlotfileData *pf, int new_timestep) {
     /* Update UI */
     update_time_label();
     update_layer_label(pf);
+    update_z_phys_button(pf);
     update_info_label(pf);
     render_slice(pf);
 }
@@ -1759,7 +1828,12 @@ void free_all_levels(PlotfileData *pf) {
             free(pf->levels[level].data);
             pf->levels[level].data = NULL;
         }
+        if (pf->levels[level].z_phys_data) {
+            free(pf->levels[level].z_phys_data);
+            pf->levels[level].z_phys_data = NULL;
+        }
         pf->levels[level].loaded = 0;
+        pf->levels[level].z_phys_loaded = 0;
         pf->levels[level].n_boxes = 0;
         /* Clear all fields to prevent stale data issues */
         for (i = 0; i < 3; i++) {
@@ -2049,6 +2123,197 @@ void extract_slice_level(LevelData *ld, double *slice, int axis, int idx) {
             }
         }
     }
+}
+
+/* Drop the cached terrain coordinate when the plotfile or AMR level changes. */
+void free_z_phys_cache(PlotfileData *pf) {
+    if (!pf) return;
+    free(pf->z_phys_data);
+    pf->z_phys_data = NULL;
+    pf->z_phys_level = -1;
+}
+
+/* Load the 3D z_phys coordinate without replacing the selected scalar field. */
+int ensure_z_phys_data(PlotfileData *pf) {
+    if (!pf) return -1;
+    int z_idx = find_variable_index(pf, "z_phys");
+    if (z_idx < 0) return -1;
+    if (pf->z_phys_data && pf->z_phys_level == pf->current_level) return 0;
+
+    free_z_phys_cache(pf);
+    size_t count = (size_t)pf->grid_dims[0] * pf->grid_dims[1] * pf->grid_dims[2];
+
+    if (z_idx == pf->current_var && pf->data) {
+        pf->z_phys_data = (double *)malloc(count * sizeof(double));
+        if (!pf->z_phys_data) return -1;
+        memcpy(pf->z_phys_data, pf->data, count * sizeof(double));
+    } else {
+        double *saved_data = pf->data;
+        pf->data = NULL;
+        if (read_variable_data(pf, z_idx) < 0 || !pf->data) {
+            free(pf->data);
+            pf->data = saved_data;
+            return -1;
+        }
+        pf->z_phys_data = pf->data;
+        pf->data = saved_data;
+    }
+
+    pf->z_phys_level = pf->current_level;
+    return 0;
+}
+
+/* Load z_phys for an overlay level while keeping that level's scalar data intact. */
+int ensure_z_phys_level_data(PlotfileData *pf, int level) {
+    if (!pf || level < 0 || level >= pf->n_levels || level >= MAX_LEVELS) return -1;
+    int z_idx = find_variable_index(pf, "z_phys");
+    if (z_idx < 0) return -1;
+
+    LevelData *ld = &pf->levels[level];
+    if (ld->z_phys_loaded && ld->z_phys_data) return 0;
+
+    size_t count = (size_t)ld->grid_dims[0] * ld->grid_dims[1] * ld->grid_dims[2];
+    if (z_idx == pf->current_var && ld->data) {
+        ld->z_phys_data = (double *)malloc(count * sizeof(double));
+        if (!ld->z_phys_data) return -1;
+        memcpy(ld->z_phys_data, ld->data, count * sizeof(double));
+    } else {
+        double *saved_data = ld->data;
+        int saved_loaded = ld->loaded;
+        ld->data = NULL;
+        if (read_variable_data_level(pf, z_idx, level) < 0 || !ld->data) {
+            free(ld->data);
+            ld->data = saved_data;
+            ld->loaded = saved_loaded;
+            return -1;
+        }
+        ld->z_phys_data = ld->data;
+        ld->data = saved_data;
+        ld->loaded = saved_loaded;
+    }
+
+    ld->z_phys_loaded = 1;
+    return 0;
+}
+
+static double z_phys_vertical_interface(const double *z_values, int width, int height,
+                                        int column, int boundary) {
+    if (!z_values || width <= 0 || height <= 0 || column < 0 || column >= width)
+        return NAN;
+    if (height == 1) return z_values[column];
+    if (boundary <= 0) {
+        double z0 = z_values[column];
+        double z1 = z_values[width + column];
+        return z0 - 0.5 * (z1 - z0);
+    }
+    if (boundary >= height) {
+        double z0 = z_values[(height - 2) * width + column];
+        double z1 = z_values[(height - 1) * width + column];
+        return z1 + 0.5 * (z1 - z0);
+    }
+    double below = z_values[(boundary - 1) * width + column];
+    double above = z_values[boundary * width + column];
+    return 0.5 * (below + above);
+}
+
+/* Cell-corner coordinate reconstructed from cell-centered, 3D z_phys values. */
+double z_phys_corner(const double *z_values, int width, int height,
+                     int x_boundary, int z_boundary) {
+    if (x_boundary <= 0)
+        return z_phys_vertical_interface(z_values, width, height, 0, z_boundary);
+    if (x_boundary >= width)
+        return z_phys_vertical_interface(z_values, width, height, width - 1, z_boundary);
+
+    double left = z_phys_vertical_interface(z_values, width, height,
+                                            x_boundary - 1, z_boundary);
+    double right = z_phys_vertical_interface(z_values, width, height,
+                                             x_boundary, z_boundary);
+    if (!isfinite(left)) return right;
+    if (!isfinite(right)) return left;
+    return 0.5 * (left + right);
+}
+
+static short z_phys_screen_coord(double value) {
+    if (value < -32760.0) return -32760;
+    if (value > 32760.0) return 32760;
+    return (short)lrint(value);
+}
+
+/* Draw an X/Z or Y/Z cross-section in its terrain-following physical geometry. */
+void draw_z_phys_cells(const double *z_values, const unsigned long *pixels,
+                       const unsigned char *mask, int width, int height,
+                       double data_xmin, double data_xmax,
+                       double view_xmin, double view_xmax,
+                       double view_ymin, double view_ymax,
+                       int offset_x, int offset_y, int draw_width, int draw_height) {
+    if (!z_values || !pixels || width <= 0 || height <= 0 ||
+        view_xmax <= view_xmin || view_ymax <= view_ymin) return;
+
+    for (int j = 0; j < height; j++) {
+        for (int i = 0; i < width; i++) {
+            int idx = j * width + i;
+            if (mask && !mask[idx]) continue;
+
+            double z00 = z_phys_corner(z_values, width, height, i, j);
+            double z10 = z_phys_corner(z_values, width, height, i + 1, j);
+            double z11 = z_phys_corner(z_values, width, height, i + 1, j + 1);
+            double z01 = z_phys_corner(z_values, width, height, i, j + 1);
+            if (!isfinite(z00) || !isfinite(z10) || !isfinite(z11) || !isfinite(z01))
+                continue;
+
+            double x0 = data_xmin + (double)i / width * (data_xmax - data_xmin);
+            double x1 = data_xmin + (double)(i + 1) / width * (data_xmax - data_xmin);
+            double sx0 = offset_x + (x0 - view_xmin) / (view_xmax - view_xmin) * draw_width;
+            double sx1 = offset_x + (x1 - view_xmin) / (view_xmax - view_xmin) * draw_width;
+            double sy00 = offset_y + (view_ymax - z00) / (view_ymax - view_ymin) * draw_height;
+            double sy10 = offset_y + (view_ymax - z10) / (view_ymax - view_ymin) * draw_height;
+            double sy11 = offset_y + (view_ymax - z11) / (view_ymax - view_ymin) * draw_height;
+            double sy01 = offset_y + (view_ymax - z01) / (view_ymax - view_ymin) * draw_height;
+
+            XPoint points[4] = {
+                {z_phys_screen_coord(sx0), z_phys_screen_coord(sy00)},
+                {z_phys_screen_coord(sx1), z_phys_screen_coord(sy10)},
+                {z_phys_screen_coord(sx1), z_phys_screen_coord(sy11)},
+                {z_phys_screen_coord(sx0), z_phys_screen_coord(sy01)}
+            };
+            XSetForeground(display, gc, pixels[idx]);
+            XFillPolygon(display, canvas, gc, points, 4, Convex, CoordModeOrigin);
+        }
+    }
+}
+
+/* Convert a canvas location back to a slice cell, including terrain geometry. */
+int canvas_to_data_indices(int mouse_x, int mouse_y, int *data_x, int *data_y) {
+    if (!data_x || !data_y || render_width <= 0 || render_height <= 0 ||
+        slice_width <= 0 || slice_height <= 0) return 0;
+
+    int ix = (int)((mouse_x - render_offset_x) * slice_width / (double)render_width);
+    if (ix < 0 || ix >= slice_width) return 0;
+
+    if (!render_uses_z_phys || !current_z_phys_slice) {
+        int iy = slice_height - 1 -
+                 (int)((mouse_y - render_offset_y) * slice_height / (double)render_height);
+        if (iy < 0 || iy >= slice_height) return 0;
+        *data_x = ix;
+        *data_y = iy;
+        return 1;
+    }
+
+    double z = render_phys_ymax - (mouse_y - render_offset_y) /
+               (double)render_height * (render_phys_ymax - render_phys_ymin);
+    for (int j = 0; j < slice_height; j++) {
+        double z0 = z_phys_vertical_interface(current_z_phys_slice, slice_width,
+                                              slice_height, ix, j);
+        double z1 = z_phys_vertical_interface(current_z_phys_slice, slice_width,
+                                              slice_height, ix, j + 1);
+        if (!isfinite(z0) || !isfinite(z1)) continue;
+        if (z >= fmin(z0, z1) && z <= fmax(z0, z1)) {
+            *data_x = ix;
+            *data_y = j;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 /* Jet colormap */
@@ -2598,6 +2863,13 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
         button = XtCreateManagedWidget(axis_labels[i], commandWidgetClass, axis_box, args, n);
         XtAddCallback(button, XtNcallback, axis_button_callback, (XtPointer)(long)i);
     }
+
+    /* Terrain-following physical height option for X/Y cross-sections. */
+    n = 0;
+    XtSetArg(args[n], XtNlabel, "z_phys: N/A"); n++;
+    z_phys_button_widget = XtCreateManagedWidget("z_phys", commandWidgetClass, axis_box, args, n);
+    XtAddCallback(z_phys_button_widget, XtNcallback, z_phys_button_callback, NULL);
+    update_z_phys_button(pf);
     
     /* Map button */
     n = 0;
@@ -2728,6 +3000,11 @@ void init_gui(PlotfileData *pf, int argc, char **argv) {
         XtSetArg(args[n], XtNlabel, "Series"); n++;
         button = XtCreateManagedWidget("timeSeries", commandWidgetClass, time_box, args, n);
         XtAddCallback(button, XtNcallback, time_series_button_callback, NULL);
+
+        n = 0;
+        XtSetArg(args[n], XtNlabel, "Video"); n++;
+        button = XtCreateManagedWidget("video", commandWidgetClass, time_box, args, n);
+        XtAddCallback(button, XtNcallback, video_button_callback, NULL);
     }
 
     /* Colorbar widget */
@@ -2849,6 +3126,36 @@ void var_button_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     }
 }
 
+void update_z_phys_button(PlotfileData *pf) {
+    if (!z_phys_button_widget || !pf) return;
+
+    int available = find_variable_index(pf, "z_phys") >= 0;
+    if (!available) {
+        XtVaSetValues(z_phys_button_widget, XtNlabel, "z_phys: unavailable", NULL);
+        XtSetSensitive(z_phys_button_widget, False);
+    } else if (pf->slice_axis == 2) {
+        XtVaSetValues(z_phys_button_widget, XtNlabel, "z_phys: N/A", NULL);
+        XtSetSensitive(z_phys_button_widget, False);
+    } else {
+        XtVaSetValues(z_phys_button_widget, XtNlabel,
+                      pf->use_z_phys ? "z_phys: ON" : "z_phys: OFF", NULL);
+        XtSetSensitive(z_phys_button_widget, True);
+    }
+}
+
+void z_phys_button_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    (void)w;
+    (void)client_data;
+    (void)call_data;
+    if (!global_pf || global_pf->slice_axis == 2 ||
+        find_variable_index(global_pf, "z_phys") < 0) return;
+
+    global_pf->use_z_phys = !global_pf->use_z_phys;
+    zoom_reset();
+    update_z_phys_button(global_pf);
+    render_slice(global_pf);
+}
+
 /* Axis button callback */
 void axis_button_callback(Widget w, XtPointer client_data, XtPointer call_data) {
     int axis = (int)(long)client_data;
@@ -2871,6 +3178,7 @@ void axis_button_callback(Widget w, XtPointer client_data, XtPointer call_data) 
         }
 
         update_layer_label(global_pf);
+        update_z_phys_button(global_pf);
         update_info_label(global_pf);
         render_slice(global_pf);
         update_distribution_histogram(-1);  /* Auto-update distribution popup */
@@ -3300,6 +3608,7 @@ void level_button_callback(Widget w, XtPointer client_data, XtPointer call_data)
     }
 
     zoom_reset();
+    free_z_phys_cache(global_pf);
     global_pf->current_level = level;
 
     /* Reload data for new level */
@@ -3314,6 +3623,7 @@ void level_button_callback(Widget w, XtPointer client_data, XtPointer call_data)
     }
 
     update_layer_label(global_pf);
+    update_z_phys_button(global_pf);
     update_info_label(global_pf);
     render_slice(global_pf);
     update_distribution_histogram(-1);  /* Auto-update distribution popup */
@@ -4052,6 +4362,8 @@ static void draw_y_label_ccw(const char *label, int x, int y_center) {
 void render_slice(PlotfileData *pf) {
     int width, height;
     double *slice;
+    double *z_phys_slice = NULL;
+    int use_z_phys_coords = 0;
     double vmin = 1e30, vmax = -1e30;
     double vsum = 0.0;
     int vcount = 0;
@@ -4096,8 +4408,24 @@ void render_slice(PlotfileData *pf) {
     }
     extract_slice(pf, slice, pf->slice_axis, pf->slice_idx);
 
+    /* z_phys is a 3D cell-centered coordinate.  Extract the same X/Z or Y/Z
+     * cross-section as the scalar field so every displayed cell gets its own
+     * terrain-following physical height. */
+    if (pf->use_z_phys && pf->slice_axis != 2 &&
+        find_variable_index(pf, "z_phys") >= 0 && ensure_z_phys_data(pf) == 0) {
+        z_phys_slice = (double *)malloc((size_t)width * height * sizeof(double));
+        if (z_phys_slice) {
+            extract_slice_from_data(pf->z_phys_data, pf, z_phys_slice,
+                                    pf->slice_axis, pf->slice_idx);
+            use_z_phys_coords = 1;
+        }
+    }
+
     /* Physical coordinate ranges for axes */
-    double phys_xmin, phys_xmax, phys_ymin, phys_ymax;
+    double phys_xmin = pf->prob_lo[x_axis];
+    double phys_xmax = pf->prob_hi[x_axis];
+    double phys_ymin = pf->prob_lo[y_axis];
+    double phys_ymax = pf->prob_hi[y_axis];
     
     if (pf->map_mode) {
         /* Map mode: phys_xmin/max and phys_ymin/max will be set in the map rendering section */
@@ -4105,14 +4433,44 @@ void render_slice(PlotfileData *pf) {
         /* Normal mode: use physical coordinates */
         phys_xmin = pf->prob_lo[x_axis];
         phys_xmax = pf->prob_hi[x_axis];
-        phys_ymin = pf->prob_lo[y_axis];
-        phys_ymax = pf->prob_hi[y_axis];
+        if (use_z_phys_coords) {
+            phys_ymin = INFINITY;
+            phys_ymax = -INFINITY;
+            for (int zb = 0; zb <= height; zb++) {
+                for (int xb = 0; xb <= width; xb++) {
+                    double z = z_phys_corner(z_phys_slice, width, height, xb, zb);
+                    if (!isfinite(z)) continue;
+                    if (z < phys_ymin) phys_ymin = z;
+                    if (z > phys_ymax) phys_ymax = z;
+                }
+            }
+            if (!isfinite(phys_ymin) || !isfinite(phys_ymax)) {
+                use_z_phys_coords = 0;
+                phys_ymin = pf->prob_lo[y_axis];
+                phys_ymax = pf->prob_hi[y_axis];
+            } else if (phys_ymax <= phys_ymin) {
+                double pad = fmax(fabs(phys_ymin) * 1.0e-6, 1.0e-6);
+                phys_ymin -= pad;
+                phys_ymax += pad;
+            }
+        } else {
+            phys_ymin = pf->prob_lo[y_axis];
+            phys_ymax = pf->prob_hi[y_axis];
+        }
     }
 
     /* Store current slice for mouse interaction */
     if (current_slice_data) free(current_slice_data);
     current_slice_data = (double *)malloc(width * height * sizeof(double));
     memcpy(current_slice_data, slice, width * height * sizeof(double));
+    if (current_z_phys_slice) free(current_z_phys_slice);
+    current_z_phys_slice = NULL;
+    if (use_z_phys_coords) {
+        current_z_phys_slice = (double *)malloc((size_t)width * height * sizeof(double));
+        if (current_z_phys_slice)
+            memcpy(current_z_phys_slice, z_phys_slice,
+                   (size_t)width * height * sizeof(double));
+    }
     slice_width = width;
     slice_height = height;
 
@@ -4311,13 +4669,18 @@ void render_slice(PlotfileData *pf) {
                 extract_slice_from_data(pf->data, pf, x_geo_slice, pf->slice_axis, pf->slice_idx);
                 read_variable_data(pf, prev_var);
                 
-                /* Generate Z coordinates for this slice */
-                for (j = 0; j < height; j++) {
-                    for (i = 0; i < width; i++) {
-                        int idx = j * width + i;
-                        /* Map grid index to physical Z coordinate */
-                        double z_coord = pf->prob_lo[2] + (j + 0.5) * (pf->prob_hi[2] - pf->prob_lo[2]) / pf->grid_dims[2];
-                        y_coord_slice[idx] = z_coord;
+                if (use_z_phys_coords) {
+                    memcpy(y_coord_slice, z_phys_slice,
+                           (size_t)width * height * sizeof(double));
+                } else {
+                    /* Generate uniform Z coordinates for this slice. */
+                    for (j = 0; j < height; j++) {
+                        for (i = 0; i < width; i++) {
+                            int idx = j * width + i;
+                            double z_coord = pf->prob_lo[2] + (j + 0.5) *
+                                (pf->prob_hi[2] - pf->prob_lo[2]) / pf->grid_dims[2];
+                            y_coord_slice[idx] = z_coord;
+                        }
                     }
                 }
             } else {
@@ -4333,13 +4696,18 @@ void render_slice(PlotfileData *pf) {
                 extract_slice_from_data(pf->data, pf, x_geo_slice, pf->slice_axis, pf->slice_idx);
                 read_variable_data(pf, prev_var);
                 
-                /* Generate Z coordinates for this slice */
-                for (j = 0; j < height; j++) {
-                    for (i = 0; i < width; i++) {
-                        int idx = j * width + i;
-                        /* Map grid index to physical Z coordinate */
-                        double z_coord = pf->prob_lo[2] + (j + 0.5) * (pf->prob_hi[2] - pf->prob_lo[2]) / pf->grid_dims[2];
-                        y_coord_slice[idx] = z_coord;
+                if (use_z_phys_coords) {
+                    memcpy(y_coord_slice, z_phys_slice,
+                           (size_t)width * height * sizeof(double));
+                } else {
+                    /* Generate uniform Z coordinates for this slice. */
+                    for (j = 0; j < height; j++) {
+                        for (i = 0; i < width; i++) {
+                            int idx = j * width + i;
+                            double z_coord = pf->prob_lo[2] + (j + 0.5) *
+                                (pf->prob_hi[2] - pf->prob_lo[2]) / pf->grid_dims[2];
+                            y_coord_slice[idx] = z_coord;
+                        }
                     }
                 }
             }
@@ -4599,23 +4967,30 @@ void render_slice(PlotfileData *pf) {
             if (j_end > height) j_end = height;
         }
 
-        for (j = j_start; j < j_end; j++) {
-            for (i = i_start; i < i_end; i++) {
-                if (base_in_box && !base_in_box[j * width + i]) continue;
+        if (use_z_phys_coords) {
+            draw_z_phys_cells(z_phys_slice, pixel_data, base_in_box, width, height,
+                              pf->prob_lo[x_axis], pf->prob_hi[x_axis],
+                              phys_xmin, phys_xmax, phys_ymin, phys_ymax,
+                              zoom_base_x, zoom_base_y, zoomed_rw, zoomed_rh);
+        } else {
+            for (j = j_start; j < j_end; j++) {
+                for (i = i_start; i < i_end; i++) {
+                    if (base_in_box && !base_in_box[j * width + i]) continue;
 
-                unsigned long pixel = pixel_data[j * width + i];
-                XSetForeground(display, gc, pixel);
+                    unsigned long pixel = pixel_data[j * width + i];
+                    XSetForeground(display, gc, pixel);
 
-                int x = zoom_base_x + (int)(i * pixel_width);
-                /* Flip y-axis: higher j (higher y in data) should be at top of screen */
-                int flipped_j = height - 1 - j;
-                int y = zoom_base_y + (int)(flipped_j * pixel_height);
-                int w = (int)((i + 1) * pixel_width) - (int)(i * pixel_width);
-                int h = (int)((flipped_j + 1) * pixel_height) - (int)(flipped_j * pixel_height);
-                if (w < 1) w = 1;
-                if (h < 1) h = 1;
+                    int x = zoom_base_x + (int)(i * pixel_width);
+                    /* Flip y-axis: higher j (higher y in data) should be at top of screen */
+                    int flipped_j = height - 1 - j;
+                    int y = zoom_base_y + (int)(flipped_j * pixel_height);
+                    int w = (int)((i + 1) * pixel_width) - (int)(i * pixel_width);
+                    int h = (int)((flipped_j + 1) * pixel_height) - (int)(flipped_j * pixel_height);
+                    if (w < 1) w = 1;
+                    if (h < 1) h = 1;
 
-                XFillRectangle(display, canvas, gc, x, y, w, h);
+                    XFillRectangle(display, canvas, gc, x, y, w, h);
+                }
             }
         }
 
@@ -4633,6 +5008,10 @@ void render_slice(PlotfileData *pf) {
         render_offset_y = zoom_base_y;
         render_width = zoomed_rw;
         render_height = zoomed_rh;
+        render_phys_ymin = phys_ymin;
+        render_phys_ymax = phys_ymax;
+        render_uses_z_phys = use_z_phys_coords && !pf->map_mode &&
+                             current_z_phys_slice != NULL;
     }
 
     /* For overlay and subsequent rendering, use zoomed coordinate system */
@@ -4815,8 +5194,12 @@ void render_slice(PlotfileData *pf) {
                 extract_slice_level(ld, geo_x_slice, pf->slice_axis, level_slice_idx);
 
                 /* Extract or compute y-axis coordinates */
+                ld->data = saved_data;
                 if (need_geo_y && geo_y_3d) {
                     ld->data = geo_y_3d;
+                    extract_slice_level(ld, geo_y_slice, pf->slice_axis, level_slice_idx);
+                } else if (use_z_phys_coords && ensure_z_phys_level_data(pf, level) == 0) {
+                    ld->data = ld->z_phys_data;
                     extract_slice_level(ld, geo_y_slice, pf->slice_axis, level_slice_idx);
                 } else {
                     /* Y-axis is physical Z coordinate */
@@ -4972,6 +5355,16 @@ void render_slice(PlotfileData *pf) {
             /* Extract slice from this level */
             double *level_slice = (double *)malloc(lwidth * lheight * sizeof(double));
             extract_slice_level(ld, level_slice, pf->slice_axis, level_slice_idx);
+            double *level_z_phys_slice = NULL;
+            if (use_z_phys_coords && ensure_z_phys_level_data(pf, level) == 0) {
+                level_z_phys_slice = (double *)malloc((size_t)lwidth * lheight * sizeof(double));
+                if (level_z_phys_slice) {
+                    double *saved_level_data = ld->data;
+                    ld->data = ld->z_phys_data;
+                    extract_slice_level(ld, level_z_phys_slice, pf->slice_axis, level_slice_idx);
+                    ld->data = saved_level_data;
+                }
+            }
 
             /* Build mask: only render cells that fall inside an actual box.
              * Gaps between non-contiguous boxes are left unmasked (0) so the
@@ -5022,23 +5415,30 @@ void render_slice(PlotfileData *pf) {
             double lpixel_width = (double)(screen_x1 - screen_x0) / lwidth;
             double lpixel_height = (double)(screen_y1 - screen_y0) / lheight;
 
-            /* Draw level pixels, skipping cells not inside any box */
-            for (int lj = 0; lj < lheight; lj++) {
-                for (int li = 0; li < lwidth; li++) {
-                    if (!in_box[lj * lwidth + li]) continue;
+            /* Draw level pixels, skipping cells not inside any box. */
+            if (level_z_phys_slice) {
+                draw_z_phys_cells(level_z_phys_slice, level_pixels, in_box, lwidth, lheight,
+                                  level_x_lo, level_x_hi,
+                                  phys_xmin, phys_xmax, phys_ymin, phys_ymax,
+                                  offset_x, offset_y, local_render_width, local_render_height);
+            } else {
+                for (int lj = 0; lj < lheight; lj++) {
+                    for (int li = 0; li < lwidth; li++) {
+                        if (!in_box[lj * lwidth + li]) continue;
 
-                    unsigned long pixel = level_pixels[lj * lwidth + li];
-                    XSetForeground(display, gc, pixel);
+                        unsigned long pixel = level_pixels[lj * lwidth + li];
+                        XSetForeground(display, gc, pixel);
 
-                    int lx = screen_x0 + (int)(li * lpixel_width);
-                    int flipped_lj = lheight - 1 - lj;
-                    int ly = screen_y0 + (int)(flipped_lj * lpixel_height);
-                    int lw = (int)((li + 1) * lpixel_width) - (int)(li * lpixel_width);
-                    int lh = (int)((flipped_lj + 1) * lpixel_height) - (int)(flipped_lj * lpixel_height);
-                    if (lw < 1) lw = 1;
-                    if (lh < 1) lh = 1;
+                        int lx = screen_x0 + (int)(li * lpixel_width);
+                        int flipped_lj = lheight - 1 - lj;
+                        int ly = screen_y0 + (int)(flipped_lj * lpixel_height);
+                        int lw = (int)((li + 1) * lpixel_width) - (int)(li * lpixel_width);
+                        int lh = (int)((flipped_lj + 1) * lpixel_height) - (int)(flipped_lj * lpixel_height);
+                        if (lw < 1) lw = 1;
+                        if (lh < 1) lh = 1;
 
-                    XFillRectangle(display, canvas, gc, lx, ly, lw, lh);
+                        XFillRectangle(display, canvas, gc, lx, ly, lw, lh);
+                    }
                 }
             }
 
@@ -5070,6 +5470,7 @@ void render_slice(PlotfileData *pf) {
             free(in_box);
 
             free(level_slice);
+            free(level_z_phys_slice);
             free(level_pixels);
 
             printf("Overlay level %d: slice %d, screen [%d,%d]-[%d,%d]\n",
@@ -5156,17 +5557,20 @@ void render_slice(PlotfileData *pf) {
         } else if (pf->slice_axis == 1) {
             /* Y-slice: lon on X, height on Y */
             strcpy(x_label, "Longitude (deg)");
-            strcpy(y_label, "Height (m)");
+            strcpy(y_label, use_z_phys_coords ? "z_phys (m)" : "Height (m)");
         } else {
             /* X-slice: lat on X, height on Y */
             strcpy(x_label, "Latitude (deg)");
-            strcpy(y_label, "Height (m)");
+            strcpy(y_label, use_z_phys_coords ? "z_phys (m)" : "Height (m)");
         }
     } else {
         /* Normal mode: use physical coordinates with units */
         const char *unit_str = "(m)";
         snprintf(x_label, sizeof(x_label), "%s %s", axis_names[x_axis], unit_str);
-        snprintf(y_label, sizeof(y_label), "%s %s", axis_names[y_axis], unit_str);
+        if (use_z_phys_coords)
+            snprintf(y_label, sizeof(y_label), "z_phys %s", unit_str);
+        else
+            snprintf(y_label, sizeof(y_label), "%s %s", axis_names[y_axis], unit_str);
     }
 
     /* X-axis label (centered below ticks) */
@@ -5220,6 +5624,7 @@ void render_slice(PlotfileData *pf) {
            pf->grid_dims[pf->slice_axis], vmin, vmax);
     
     free(slice);
+    free(z_phys_slice);
     if (base_in_box) free(base_in_box);
 }
 
@@ -5296,9 +5701,8 @@ void canvas_motion_handler(Widget w, XtPointer client_data, XEvent *event, Boole
             if (abs(dx) < 5 && abs(dy) < 5) {
                 if (mouse_x >= vis_area_x && mouse_x < vis_area_x + vis_area_w &&
                     mouse_y >= vis_area_y && mouse_y < vis_area_y + vis_area_h) {
-                    int data_x = (int)((mouse_x - render_offset_x) * slice_width / (double)render_width);
-                    int data_y = slice_height - 1 - (int)((mouse_y - render_offset_y) * slice_height / (double)render_height);
-                    if (data_x >= 0 && data_x < slice_width && data_y >= 0 && data_y < slice_height) {
+                    int data_x, data_y;
+                    if (canvas_to_data_indices(mouse_x, mouse_y, &data_x, &data_y)) {
                         show_line_profiles(global_pf, data_x, data_y);
                     }
                 }
@@ -5326,12 +5730,9 @@ void canvas_motion_handler(Widget w, XtPointer client_data, XEvent *event, Boole
         return;
     }
 
-    /* Convert mouse coordinates to data coordinates using zoomed render params */
-    int data_x = (int)((mouse_x - render_offset_x) * slice_width / (double)render_width);
-    /* Flip y-axis for mouse coordinates to match flipped rendering */
-    int data_y = slice_height - 1 - (int)((mouse_y - render_offset_y) * slice_height / (double)render_height);
-
-    if (data_x >= 0 && data_x < slice_width && data_y >= 0 && data_y < slice_height) {
+    /* Convert mouse coordinates to the regular or terrain-following cell. */
+    int data_x, data_y;
+    if (canvas_to_data_indices(mouse_x, mouse_y, &data_x, &data_y)) {
         double value = current_slice_data[data_y * slice_width + data_x];
 
         /* Update hover value text and info label */
@@ -5407,9 +5808,8 @@ void canvas_button_release_handler(Widget w, XtPointer client_data, XEvent *even
                 mouse_y < vis_area_y || mouse_y >= vis_area_y + vis_area_h) {
                 return;
             }
-            int data_x = (int)((mouse_x - render_offset_x) * slice_width / (double)render_width);
-            int data_y = slice_height - 1 - (int)((mouse_y - render_offset_y) * slice_height / (double)render_height);
-            if (data_x >= 0 && data_x < slice_width && data_y >= 0 && data_y < slice_height) {
+            int data_x, data_y;
+            if (canvas_to_data_indices(mouse_x, mouse_y, &data_x, &data_y)) {
                 show_line_profiles(global_pf, data_x, data_y);
             }
         }
@@ -5732,6 +6132,12 @@ void show_line_profiles(PlotfileData *pf, int data_x, int data_y) {
             layer[a][n] = n;
         }
     }
+    if (pf->use_z_phys && ensure_z_phys_data(pf) == 0) {
+        for (int k = 0; k < dims[2]; k++) {
+            int idx = k * dims[0] * dims[1] + y_coord * dims[0] + x_coord;
+            phys[2][k] = pf->z_phys_data[idx];
+        }
+    }
 
     /* Create plot data — default x axis = physical (m) */
     PlotData *x_plot_data = (PlotData *)malloc(sizeof(PlotData));
@@ -5783,7 +6189,8 @@ void show_line_profiles(PlotfileData *pf, int data_x, int data_y) {
     z_plot_data->xmax = phys[2][dims[2]-1];
     snprintf(z_plot_data->title, sizeof(z_plot_data->title), "%s along Z (X=%d, Y=%d)",
              pf->variables[pf->current_var], x_coord, y_coord);
-    snprintf(z_plot_data->xlabel, sizeof(z_plot_data->xlabel), "Height (m)");
+    snprintf(z_plot_data->xlabel, sizeof(z_plot_data->xlabel), "%s",
+             pf->use_z_phys && pf->z_phys_data ? "z_phys (m)" : "Height (m)");
 
     /* Build LineProfilePopupData */
     LineProfilePopupData *pd = (LineProfilePopupData *)malloc(sizeof(LineProfilePopupData));
@@ -5801,7 +6208,8 @@ void show_line_profiles(PlotfileData *pf, int data_x, int data_y) {
     pd->show_layer = 0;
     snprintf(pd->phys_labels[0], sizeof(pd->phys_labels[0]), "X (m)");
     snprintf(pd->phys_labels[1], sizeof(pd->phys_labels[1]), "Y (m)");
-    snprintf(pd->phys_labels[2], sizeof(pd->phys_labels[2]), "Height (m)");
+    snprintf(pd->phys_labels[2], sizeof(pd->phys_labels[2]), "%s",
+             pf->use_z_phys && pf->z_phys_data ? "z_phys (m)" : "Height (m)");
     snprintf(pd->layer_labels[0], sizeof(pd->layer_labels[0]), "X Layer");
     snprintf(pd->layer_labels[1], sizeof(pd->layer_labels[1]), "Y Layer");
     snprintf(pd->layer_labels[2], sizeof(pd->layer_labels[2]), "Z Layer");
@@ -8384,22 +8792,34 @@ void render_quiver_overlay(PlotfileData *pf) {
                 /* Y-slice: lon vs Z */
                 read_variable_data(pf, lon_idx);
                 extract_slice_from_data(pf->data, pf, x_coord_slice, pf->slice_axis, pf->slice_idx);
-                for (int jj = 0; jj < height; jj++) {
-                    for (int ii = 0; ii < width; ii++) {
-                        int idx = jj * width + ii;
-                        double z_coord = pf->prob_lo[2] + (jj + 0.5) * (pf->prob_hi[2] - pf->prob_lo[2]) / pf->grid_dims[2];
-                        y_coord_slice[idx] = z_coord;
+                if (pf->use_z_phys && current_z_phys_slice) {
+                    memcpy(y_coord_slice, current_z_phys_slice,
+                           (size_t)width * height * sizeof(double));
+                } else {
+                    for (int jj = 0; jj < height; jj++) {
+                        for (int ii = 0; ii < width; ii++) {
+                            int idx = jj * width + ii;
+                            double z_coord = pf->prob_lo[2] + (jj + 0.5) *
+                                (pf->prob_hi[2] - pf->prob_lo[2]) / pf->grid_dims[2];
+                            y_coord_slice[idx] = z_coord;
+                        }
                     }
                 }
             } else {
                 /* X-slice: lat vs Z */
                 read_variable_data(pf, lat_idx);
                 extract_slice_from_data(pf->data, pf, x_coord_slice, pf->slice_axis, pf->slice_idx);
-                for (int jj = 0; jj < height; jj++) {
-                    for (int ii = 0; ii < width; ii++) {
-                        int idx = jj * width + ii;
-                        double z_coord = pf->prob_lo[2] + (jj + 0.5) * (pf->prob_hi[2] - pf->prob_lo[2]) / pf->grid_dims[2];
-                        y_coord_slice[idx] = z_coord;
+                if (pf->use_z_phys && current_z_phys_slice) {
+                    memcpy(y_coord_slice, current_z_phys_slice,
+                           (size_t)width * height * sizeof(double));
+                } else {
+                    for (int jj = 0; jj < height; jj++) {
+                        for (int ii = 0; ii < width; ii++) {
+                            int idx = jj * width + ii;
+                            double z_coord = pf->prob_lo[2] + (jj + 0.5) *
+                                (pf->prob_hi[2] - pf->prob_lo[2]) / pf->grid_dims[2];
+                            y_coord_slice[idx] = z_coord;
+                        }
                     }
                 }
             }
@@ -8528,10 +8948,16 @@ void render_quiver_overlay(PlotfileData *pf) {
                 arrow_dy = (int)(scale * (u * basis_iy + v * basis_jy));
             } else {
                 /* Convert data coordinates to screen coordinates */
-                /* Flip Y to match image rendering (higher j = higher physical Y = screen top) */
-                int flipped_j = height - 1 - j;
                 screen_x = render_offset_x + (int)((double)i * render_width / width);
-                screen_y = render_offset_y + (int)((double)flipped_j * render_height / height);
+                if (render_uses_z_phys && current_z_phys_slice) {
+                    double z = current_z_phys_slice[idx];
+                    screen_y = render_offset_y + (int)((render_phys_ymax - z) /
+                        (render_phys_ymax - render_phys_ymin) * render_height);
+                } else {
+                    /* Flip Y to match regular-grid image rendering. */
+                    int flipped_j = height - 1 - j;
+                    screen_y = render_offset_y + (int)((double)flipped_j * render_height / height);
+                }
 
                 arrow_dx = (int)(u * scale);
                 arrow_dy = (int)(-v * scale);  /* Flip Y to match screen coordinates */
@@ -9005,11 +9431,254 @@ void show_time_series(PlotfileData *pf) {
     printf("Time series statistics displayed.\n");
 }
 
+/* --------------------------- Video playback --------------------------- */
+static double video_value_for_scale(double v, int mode) {
+    if (mode == 1) return log10(v);
+    if (mode == 2) return log10(-v);
+    return v;
+}
+
+static int video_value_valid(double v, int mode) {
+    return isfinite(v) && (mode == 0 || (mode == 1 ? v > 0.0 : v < 0.0));
+}
+
+static void video_status(VideoState *vs, const char *text) {
+    if (vs && vs->status_label) XtVaSetValues(vs->status_label, XtNlabel, text, NULL);
+}
+
+static int video_prepare_plot(VideoState *vs, int ti, PlotfileData *tmp,
+                              int *var_idx, int *slice_idx) {
+    memset(tmp, 0, sizeof(*tmp));
+    strncpy(tmp->plotfile_dir, timestep_paths[ti], MAX_PATH - 1);
+    if (read_header(tmp) < 0) return -1;
+    *var_idx = find_variable_index(tmp, vs->variable_name);
+    if (*var_idx < 0) return -1;
+    tmp->current_level = vs->requested_level;
+    if (tmp->current_level >= tmp->n_levels) {
+        fprintf(stderr, "Video: timestep %d has fewer levels; using level %d\n",
+                ti + 1, tmp->n_levels - 1);
+        tmp->current_level = tmp->n_levels - 1;
+    }
+    if (tmp->current_level < 0) tmp->current_level = 0;
+    if (read_cell_h(tmp) < 0 || read_variable_data(tmp, *var_idx) < 0) return -1;
+    tmp->slice_axis = vs->slice_axis;
+    tmp->overlay_mode = vs->overlay_mode;
+    tmp->map_mode = vs->map_mode;
+    tmp->colormap = vs->colormap;
+    double span = tmp->prob_hi[vs->slice_axis] - tmp->prob_lo[vs->slice_axis];
+    double cells = (double)(tmp->level_lo[vs->slice_axis] + tmp->grid_dims[vs->slice_axis]);
+    double dx = (cells > 0.0) ? span / cells : span;
+    *slice_idx = (int)floor((vs->slice_position - tmp->prob_lo[vs->slice_axis]) / dx)
+                 - tmp->level_lo[vs->slice_axis];
+    if (*slice_idx < 0) *slice_idx = 0;
+    if (*slice_idx >= tmp->grid_dims[vs->slice_axis])
+        *slice_idx = tmp->grid_dims[vs->slice_axis] - 1;
+    tmp->slice_idx = *slice_idx;
+    if (vs->overlay_mode && tmp->n_levels > 1) load_all_levels(tmp, *var_idx);
+    return 0;
+}
+
+static void video_free_plot(PlotfileData *tmp) {
+    if (tmp->data) free(tmp->data);
+    tmp->data = NULL;
+    free_all_levels(tmp);
+}
+
+static void video_scan_slice(VideoState *vs, PlotfileData *tmp, int idx,
+                             double *lo, double *hi) {
+    int w = (vs->slice_axis == 2) ? tmp->grid_dims[0] : tmp->grid_dims[1 == vs->slice_axis ? 2 : 1];
+    int h = (vs->slice_axis == 2) ? tmp->grid_dims[1] : tmp->grid_dims[2];
+    if (vs->slice_axis == 1) { w = tmp->grid_dims[0]; h = tmp->grid_dims[2]; }
+    double *s = (double *)malloc((size_t)w * h * sizeof(double));
+    if (!s) return;
+    extract_slice(tmp, s, vs->slice_axis, idx);
+    unsigned char *mask = (unsigned char *)calloc((size_t)w * h, 1);
+    if (!mask) { free(s); return; }
+    for (int b = 0; b < tmp->n_boxes; b++) {
+        Box *box = &tmp->boxes[b];
+        int coord = idx + tmp->level_lo[vs->slice_axis];
+        if (coord < box->lo[vs->slice_axis] || coord > box->hi[vs->slice_axis]) continue;
+        int ax = (vs->slice_axis == 2) ? 0 : (vs->slice_axis == 1 ? 0 : 1);
+        int ay = (vs->slice_axis == 2) ? 1 : 2;
+        int x0 = box->lo[ax] - tmp->level_lo[ax], x1 = box->hi[ax] - tmp->level_lo[ax];
+        int y0 = box->lo[ay] - tmp->level_lo[ay], y1 = box->hi[ay] - tmp->level_lo[ay];
+        if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0;
+        if (x1 >= w) x1 = w - 1; if (y1 >= h) y1 = h - 1;
+        for (int y = y0; y <= y1; y++) for (int x = x0; x <= x1; x++) mask[y*w+x] = 1;
+    }
+    for (int p = 0; p < w*h; p++) if (mask[p] && video_value_valid(s[p], vs->scale_mode)) {
+        double v = s[p];
+        if (v < *lo) *lo = v; if (v > *hi) *hi = v;
+    }
+    free(mask); free(s);
+}
+
+static unsigned long video_pack_pixel(Visual *visual, RGB c) {
+    unsigned long p = 0;
+    unsigned long masks[3] = {visual->red_mask, visual->green_mask, visual->blue_mask};
+    unsigned char vals[3] = {c.r, c.g, c.b};
+    for (int n = 0; n < 3; n++) {
+        if (!masks[n]) continue;
+        int shift = 0; unsigned long m = masks[n];
+        while (!(m & 1UL)) { shift++; m >>= 1; }
+        p |= (((unsigned long)vals[n] * m + 127) / 255) << shift;
+    }
+    return p;
+}
+
+static unsigned char video_unpack(unsigned long p, unsigned long mask) {
+    if (!mask) return 0;
+    int shift = 0; unsigned long m = mask;
+    while (!(m & 1UL)) { shift++; m >>= 1; }
+    return (unsigned char)((((p & mask) >> shift) * 255UL + m/2) / m);
+}
+
+static int video_render_frame(VideoState *vs, PlotfileData *tmp, int idx, VideoFrame *out, int frame_no) {
+    int sw = (vs->slice_axis == 2) ? tmp->grid_dims[0] : tmp->grid_dims[1];
+    int sh = (vs->slice_axis == 2) ? tmp->grid_dims[1] : tmp->grid_dims[2];
+    if (vs->slice_axis == 1) { sw = tmp->grid_dims[0]; sh = tmp->grid_dims[2]; }
+    double *slice = (double *)malloc((size_t)sw * sh * sizeof(double));
+    if (!slice) return -1;
+    extract_slice(tmp, slice, vs->slice_axis, idx);
+    Display *d = display; Visual *vis = DefaultVisual(d, screen);
+    int depth = DefaultDepth(d, screen), bpp = (depth <= 16 ? 2 : 4);
+    char *raw = (char *)calloc((size_t)VIDEO_FRAME_WIDTH * VIDEO_FRAME_HEIGHT, bpp);
+    if (!raw) { free(slice); return -1; }
+    XImage *im = XCreateImage(d, vis, depth, ZPixmap, 0, raw, VIDEO_FRAME_WIDTH,
+                              VIDEO_FRAME_HEIGHT, 32, 0);
+    if (!im) { free(raw); free(slice); return -1; }
+    unsigned long white = video_pack_pixel(vis, (RGB){255,255,255});
+    for (int y = 0; y < VIDEO_FRAME_HEIGHT; y++) for (int x = 0; x < VIDEO_FRAME_WIDTH; x++) XPutPixel(im,x,y,white);
+    int ox=80, oy=65, ow=790, oh=570;
+    for (int y=0; y<oh; y++) for (int x=0; x<ow; x++) {
+        int sx = (int)((long long)x * sw / ow), sy = (int)((long long)(oh-1-y) * sh / oh);
+        double v = slice[sy*sw+sx]; double z = 0.0;
+        if (video_value_valid(v, vs->scale_mode) && vs->global_vmax > vs->global_vmin)
+            z = (video_value_for_scale(v,vs->scale_mode)-video_value_for_scale(vs->global_vmin,vs->scale_mode)) /
+                (video_value_for_scale(vs->global_vmax,vs->scale_mode)-video_value_for_scale(vs->global_vmin,vs->scale_mode));
+        RGB c = video_value_valid(v,vs->scale_mode) ? get_colormap_rgb(z,vs->colormap) : (RGB){220,220,220};
+        XPutPixel(im, ox+x, oy+y, video_pack_pixel(vis,c));
+    }
+    XPutImage(d, vs->frame_pixmap, gc, im, 0,0,0,0,VIDEO_FRAME_WIDTH,VIDEO_FRAME_HEIGHT);
+    char title[256];
+    snprintf(title,sizeof(title),"%s   t = %.8g   frame %d/%d",vs->variable_name,tmp->time,frame_no+1,vs->n_frames);
+    XSetForeground(d,text_gc,BlackPixel(d,screen)); XDrawString(d,vs->frame_pixmap,text_gc,80,32,title,strlen(title));
+    const char *unit = get_variable_unit(vs->variable_name); char cb[160];
+    snprintf(cb,sizeof(cb),"%s %s",vs->variable_name,unit); XDrawString(d,vs->frame_pixmap,text_gc,885,55,cb,strlen(cb));
+    for (int y=0;y<oh;y++) { RGB c=get_colormap_rgb(1.0-(double)y/oh,vs->colormap); XSetForeground(d,gc,video_pack_pixel(vis,c)); XFillRectangle(d,vs->frame_pixmap,gc,885,oy+y,35,1); }
+    XDrawRectangle(d,vs->frame_pixmap,text_gc,ox,oy,ow,oh);
+    const char *axes[] = {"X (m)", "Y (m)", "Z (m)"};
+    int xa = vs->slice_axis == 2 ? 0 : (vs->slice_axis == 1 ? 0 : 1);
+    int ya = 2;
+    XDrawString(d,vs->frame_pixmap,text_gc,ox+ow/2-20,oy+oh+28,axes[xa],strlen(axes[xa]));
+    XDrawString(d,vs->frame_pixmap,text_gc,18,oy+oh/2,axes[ya],strlen(axes[ya]));
+    char range[160];
+    snprintf(range,sizeof(range),"range: %.6g to %.6g (%s)",vs->global_vmin,vs->global_vmax,
+             vs->scale_mode==1?"Log(+)":(vs->scale_mode==2?"Log(-)":"Linear"));
+    XDrawString(d,vs->frame_pixmap,text_gc,80,VIDEO_FRAME_HEIGHT-18,range,strlen(range));
+    XDestroyImage(im);
+    XImage *got = XGetImage(d,vs->frame_pixmap,0,0,VIDEO_FRAME_WIDTH,VIDEO_FRAME_HEIGHT,AllPlanes,ZPixmap);
+    if (!got) { free(slice); return -1; }
+    out->rgb=(unsigned char*)malloc((size_t)VIDEO_FRAME_WIDTH*VIDEO_FRAME_HEIGHT*3);
+    if (!out->rgb) { XDestroyImage(got); free(slice); return -1; }
+    for (int y=0;y<VIDEO_FRAME_HEIGHT;y++) for(int x=0;x<VIDEO_FRAME_WIDTH;x++) { unsigned long p=XGetPixel(got,x,y); size_t q=((size_t)y*VIDEO_FRAME_WIDTH+x)*3; out->rgb[q]=video_unpack(p,vis->red_mask); out->rgb[q+1]=video_unpack(p,vis->green_mask); out->rgb[q+2]=video_unpack(p,vis->blue_mask); }
+    out->time=tmp->time; out->timestep_number=timestep_numbers[vs->load_index];
+    XDestroyImage(got); free(slice); return 0;
+}
+
+static void video_show_frame(VideoState *vs) {
+    if (!vs || !vs->frames || !vs->frames[vs->current_frame].rgb) return;
+    size_t n=(size_t)vs->frame_width*vs->frame_height*3;
+    memcpy(vs->display_rgb,vs->frames[vs->current_frame].rgb,n);
+    for (int y=0;y<vs->frame_height;y++) for(int x=0;x<vs->frame_width;x++) {
+        size_t q=((size_t)y*vs->frame_width+x)*3;
+        XPutPixel(vs->display_image,x,y,video_pack_pixel(DefaultVisual(display,screen),(RGB){vs->display_rgb[q],vs->display_rgb[q+1],vs->display_rgb[q+2]}));
+    }
+    XPutImage(display,vs->canvas,vs->gc,vs->display_image,0,0,0,0,vs->frame_width,vs->frame_height);
+    char text[64]; snprintf(text,sizeof(text),"Frame %d/%d",vs->current_frame+1,vs->n_frames);
+    XtVaSetValues(vs->frame_label,XtNlabel,text,NULL);
+    float top=vs->n_frames>1?(float)vs->current_frame/(vs->n_frames-1):0.0f;
+    XawScrollbarSetThumb(vs->scrubber,top,0.08f);
+}
+
+static void video_set_timer(VideoState *vs) {
+    if (vs->timer_id) XtRemoveTimeOut(vs->timer_id);
+    vs->timer_id=0;
+    if (vs->playing) vs->timer_id=XtAppAddTimeOut(XtWidgetToApplicationContext(vs->shell),(unsigned long)(1000.0/vs->fps),video_timer_callback,vs);
+}
+
+static Boolean video_load_workproc(XtPointer client_data) {
+    VideoState *vs=(VideoState*)client_data;
+    if (!vs || vs->closing) return True;
+    PlotfileData tmp; int var,idx;
+    if (vs->load_index >= n_timesteps) {
+        if (vs->load_phase==0) {
+            if (!isfinite(vs->global_vmin) || !isfinite(vs->global_vmax)) { video_status(vs,"Error: no finite values for selected scale"); vs->loading=0; return True; }
+            if (vs->global_vmin==vs->global_vmax) { double e=fmax(fabs(vs->global_vmin)*1e-6,1e-12); vs->global_vmin-=e; vs->global_vmax+=e; }
+            size_t bytes=(size_t)n_timesteps*VIDEO_FRAME_WIDTH*VIDEO_FRAME_HEIGHT*3;
+            fprintf(stderr,"Video frame cache: %zu bytes\n",bytes);
+            if (bytes>VIDEO_CACHE_LIMIT) { video_status(vs,"Error: video cache exceeds 2 GiB safety limit"); vs->loading=0; return True; }
+            vs->frames=(VideoFrame*)calloc(n_timesteps,sizeof(VideoFrame));
+            if (!vs->frames) { video_status(vs,"Error: unable to allocate video frame cache"); vs->loading=0; return True; }
+            vs->load_phase=1; vs->load_index=0;
+        } else {
+            vs->loading=0; XtSetSensitive(vs->play_button,True); XtSetSensitive(vs->stop_button,True); XtSetSensitive(vs->save_button,True);
+            video_status(vs,"Ready"); video_show_frame(vs); return True;
+        }
+    }
+    char status[128]; snprintf(status,sizeof(status),"Loading video: %s %d/%d",vs->load_phase==0?"scanning range":"rendering frames",vs->load_index+1,n_timesteps); video_status(vs,status);
+    if (video_prepare_plot(vs,vs->load_index,&tmp,&var,&idx)<0) { video_free_plot(&tmp); video_status(vs,"Error: could not load a video timestep"); vs->loading=0; return True; }
+    if (vs->load_phase==0) video_scan_slice(vs,&tmp,idx,&vs->global_vmin,&vs->global_vmax);
+    else if (video_render_frame(vs,&tmp,idx,&vs->frames[vs->load_index],vs->load_index)<0) { video_free_plot(&tmp); video_status(vs,"Error: could not render video frame"); vs->loading=0; return True; }
+    video_free_plot(&tmp); vs->load_index++;
+    return False;
+}
+
+static void video_expose_callback(Widget w, XtPointer cd, XtPointer call_data) { (void)w;(void)call_data; video_show_frame((VideoState*)cd); }
+static void video_play_callback(Widget w, XtPointer cd, XtPointer call_data) { (void)w;(void)call_data; VideoState *vs=cd; if(!vs||vs->loading)return; if(vs->current_frame>=vs->n_frames-1)vs->current_frame=0; vs->playing=1; video_show_frame(vs); video_set_timer(vs); }
+static void video_stop_callback(Widget w, XtPointer cd, XtPointer call_data) { (void)w;(void)call_data; VideoState *vs=cd; if(vs){vs->playing=0;video_set_timer(vs);} }
+static void video_scrub_callback(Widget w, XtPointer cd, XtPointer call_data) { (void)w; VideoState *vs=cd; float *p=(float*)call_data; if(vs&&p&&vs->n_frames>1){vs->current_frame=(int)floor(*p*(vs->n_frames-1)+0.5);if(vs->current_frame<0)vs->current_frame=0;if(vs->current_frame>=vs->n_frames)vs->current_frame=vs->n_frames-1;video_show_frame(vs);} }
+static void video_timer_callback(XtPointer cd, XtIntervalId *id) { (void)id; VideoState *vs=cd; if(!vs||!vs->playing)return; if(vs->current_frame>=vs->n_frames-1){vs->playing=0;vs->timer_id=0;video_show_frame(vs);return;} vs->current_frame++; video_show_frame(vs); video_set_timer(vs); }
+
+static void video_close_callback(Widget w, XtPointer cd, XtPointer call_data) {
+    (void)w;(void)call_data; VideoState *vs=cd; if(!vs)return; vs->closing=1;
+    if(vs->work_id)XtRemoveWorkProc(vs->work_id); if(vs->timer_id)XtRemoveTimeOut(vs->timer_id);
+    if(vs->display_image)XDestroyImage(vs->display_image); if(vs->gc)XFreeGC(display,vs->gc); if(vs->frame_pixmap)XFreePixmap(display,vs->frame_pixmap); free(vs->display_rgb);
+    if(vs->frames){for(int i=0;i<vs->n_frames;i++)free(vs->frames[i].rgb);free(vs->frames);} if(active_video==vs)active_video=NULL; XtDestroyWidget(vs->shell); free(vs);
+}
+
+static void video_export(VideoState *vs, const char *path, int mp4) {
+    if(!vs||!path||!*path)return; char out[MAX_PATH]; snprintf(out,sizeof(out),"%s",path);
+    const char *ext=mp4?".mp4":".gif"; if(!strstr(out,ext))strncat(out,ext,sizeof(out)-strlen(out)-1);
+    if(access(out,F_OK)==0){video_status(vs,"Refusing to overwrite existing file");return;}
+    char td[]="/tmp/pltview-video-XXXXXX"; if(!mkdtemp(td)){video_status(vs,"Error: cannot create temporary export directory");return;}
+    char file[MAX_PATH]; int ok=1; for(int i=0;i<vs->n_frames;i++){snprintf(file,sizeof(file),"%s/frame_%06d.ppm",td,i+1);FILE*f=fopen(file,"wb");if(!f){ok=0;break;}fprintf(f,"P6\n%d %d\n255\n",vs->frame_width,vs->frame_height);fwrite(vs->frames[i].rgb,1,(size_t)vs->frame_width*vs->frame_height*3,f);fclose(f);}
+    if(ok){char rate[32];snprintf(rate,sizeof(rate),"%.6g",vs->fps);char pattern[MAX_PATH];snprintf(pattern,sizeof(pattern),"%s/frame_%%06d.ppm",td);char *av[12];int n=0;av[n++]="ffmpeg";av[n++]="-y";av[n++]="-framerate";av[n++]=rate;av[n++]="-i";av[n++]=pattern;if(mp4){av[n++]="-pix_fmt";av[n++]="yuv420p";}else{av[n++]="-vf";av[n++]="format=rgb24";}av[n++]=out;av[n]=NULL;pid_t p=fork();if(p==0){execvp(av[0],av);_exit(127);}if(p>0&&waitpid(p,NULL,0)==p&&access(out,F_OK)==0)video_status(vs,"Video saved");else video_status(vs,"Error: ffmpeg export failed");}
+    for(int i=0;i<vs->n_frames;i++){snprintf(file,sizeof(file),"%s/frame_%06d.ppm",td,i+1);unlink(file);}rmdir(td);
+}
+static void video_save_gif_callback(Widget w,XtPointer cd,XtPointer c){(void)w;(void)c;VideoState*vs=cd;video_export(vs,XawDialogGetValueString(vs->save_text),0);}
+static void video_save_mp4_callback(Widget w,XtPointer cd,XtPointer c){(void)w;(void)c;VideoState*vs=cd;video_export(vs,XawDialogGetValueString(vs->save_text),1);}
+static void video_save_callback(Widget w,XtPointer cd,XtPointer c){(void)w;(void)c;VideoState*vs=cd;if(vs&&vs->n_frames>0){vs->save_shell=XtVaCreatePopupShell("Save Video",transientShellWidgetClass,vs->shell,NULL);Widget d=XtVaCreateManagedWidget("Output path",dialogWidgetClass,vs->save_shell,XtNvalue,"animation",NULL);vs->save_text=d;Widget g=XtVaCreateManagedWidget("Save GIF",commandWidgetClass,d,XtNfromVert,d,NULL);XtAddCallback(g,XtNcallback,video_save_gif_callback,vs);Widget m=XtVaCreateManagedWidget("Save MP4",commandWidgetClass,d,XtNfromHoriz,g,NULL);XtAddCallback(m,XtNcallback,video_save_mp4_callback,vs);XtPopup(vs->save_shell,XtGrabNone);}}
+
+static void video_fps_apply(Widget w,XtPointer cd,XtPointer c){(void)w;(void)c;VideoState*vs=cd;char *s=XawDialogGetValueString(vs->fps_text);char*e;double f=strtod(s,&e);if(e==s||*e||f<0.1||f>60.0){video_status(vs,"Invalid FPS (use 0.1 to 60.0)");return;}vs->fps=f;video_status(vs,"FPS updated");if(vs->playing)video_set_timer(vs);}
+
+void video_button_callback(Widget w, XtPointer client_data, XtPointer call_data) {
+    (void)w;(void)client_data;(void)call_data; if(!global_pf||n_timesteps<2)return;
+    if(active_video){XRaiseWindow(display,XtWindow(active_video->shell));return;}
+    VideoState*vs=calloc(1,sizeof(*vs));if(!vs)return;active_video=vs;vs->n_frames=n_timesteps;vs->frame_width=VIDEO_FRAME_WIDTH;vs->frame_height=VIDEO_FRAME_HEIGHT;vs->fps=5.0;vs->slice_axis=global_pf->slice_axis;vs->requested_level=global_pf->current_level;vs->overlay_mode=global_pf->overlay_mode;vs->map_mode=global_pf->map_mode;vs->colormap=global_pf->colormap;vs->scale_mode=scale_mode;strncpy(vs->variable_name,global_pf->variables[global_pf->current_var],63);
+    double span=global_pf->prob_hi[vs->slice_axis]-global_pf->prob_lo[vs->slice_axis];double cells=global_pf->level_lo[vs->slice_axis]+global_pf->grid_dims[vs->slice_axis];double dx=span/(cells>0?cells:1);vs->slice_position=global_pf->prob_lo[vs->slice_axis]+(global_pf->level_lo[vs->slice_axis]+global_pf->slice_idx+0.5)*dx;vs->global_vmin=INFINITY;vs->global_vmax=-INFINITY;
+    vs->shell=XtVaCreatePopupShell("Video",topLevelShellWidgetClass,toplevel,XtNtitle,"PLTView Video",NULL);Widget f=XtVaCreateManagedWidget("videoForm",formWidgetClass,vs->shell,NULL);vs->status_label=XtVaCreateManagedWidget("Loading video",labelWidgetClass,f,XtNwidth,VIDEO_FRAME_WIDTH,NULL);vs->canvas_widget=XtVaCreateManagedWidget("videoCanvas",simpleWidgetClass,f,XtNfromVert,vs->status_label,XtNwidth,VIDEO_FRAME_WIDTH,XtNheight,VIDEO_FRAME_HEIGHT,NULL);vs->frame_label=XtVaCreateManagedWidget("Frame 0/0",labelWidgetClass,f,XtNfromVert,vs->canvas_widget,NULL);vs->scrubber=XtVaCreateManagedWidget("scrubber",scrollbarWidgetClass,f,XtNfromVert,vs->frame_label,XtNorientation,XtorientHorizontal,XtNwidth,700,NULL);XtAddCallback(vs->scrubber,XtNjumpProc,video_scrub_callback,vs);
+    vs->play_button=XtVaCreateManagedWidget("Play",commandWidgetClass,f,XtNfromVert,vs->scrubber,NULL);vs->stop_button=XtVaCreateManagedWidget("Stop",commandWidgetClass,f,XtNfromVert,vs->scrubber,XtNfromHoriz,vs->play_button,NULL);vs->save_button=XtVaCreateManagedWidget("Save",commandWidgetClass,f,XtNfromVert,vs->scrubber,XtNfromHoriz,vs->stop_button,NULL);Widget close=XtVaCreateManagedWidget("Close",commandWidgetClass,f,XtNfromVert,vs->scrubber,XtNfromHoriz,vs->save_button,NULL);vs->fps_text=XtVaCreateManagedWidget("FPS",dialogWidgetClass,f,XtNfromVert,vs->play_button,XtNvalue,"5.0",NULL);Widget apply=XtVaCreateManagedWidget("Apply",commandWidgetClass,f,XtNfromVert,vs->play_button,XtNfromHoriz,vs->fps_text,NULL);XtAddCallback(apply,XtNcallback,video_fps_apply,vs);XtAddCallback(vs->play_button,XtNcallback,video_play_callback,vs);XtAddCallback(vs->stop_button,XtNcallback,video_stop_callback,vs);XtAddCallback(vs->save_button,XtNcallback,video_save_callback,vs);XtAddCallback(close,XtNcallback,video_close_callback,vs);XtAddCallback(vs->canvas_widget,XtNcallback,video_expose_callback,vs);XtRealizeWidget(vs->shell);vs->canvas=XtWindow(vs->canvas_widget);vs->gc=XCreateGC(display,vs->canvas,0,NULL);vs->display_rgb=calloc((size_t)VIDEO_FRAME_WIDTH*VIDEO_FRAME_HEIGHT*3,1);vs->display_image=XCreateImage(display,DefaultVisual(display,screen),DefaultDepth(display,screen),ZPixmap,0,(char*)calloc((size_t)VIDEO_FRAME_WIDTH*VIDEO_FRAME_HEIGHT,(DefaultDepth(display,screen)<=16?2:4)),VIDEO_FRAME_WIDTH,VIDEO_FRAME_HEIGHT,32,0);vs->frame_pixmap=XCreatePixmap(display,vs->canvas,VIDEO_FRAME_WIDTH,VIDEO_FRAME_HEIGHT,DefaultDepth(display,screen));XtPopup(vs->shell,XtGrabNone);XtSetSensitive(vs->play_button,False);XtSetSensitive(vs->stop_button,False);XtSetSensitive(vs->save_button,False);vs->loading=1;vs->work_id=XtAppAddWorkProc(XtWidgetToApplicationContext(vs->shell),video_load_workproc,vs);
+}
+
 void cleanup(PlotfileData *pf) {
     if (pf->data) free(pf->data);
+    free_z_phys_cache(pf);
+    free_all_levels(pf);
     if (pixel_data) free(pixel_data);
     pixel_data_size = 0;
     if (current_slice_data) free(current_slice_data);
+    if (current_z_phys_slice) free(current_z_phys_slice);
 }
 
 /* ========== SDM Mode GUI and Rendering ========== */

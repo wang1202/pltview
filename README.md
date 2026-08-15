@@ -162,6 +162,7 @@ SDM mode displays droplet size distribution histograms from AMReX particle data 
 
 - **Variable Buttons**: Select which variable to visualize
 - **X/Y/Z Buttons**: Switch viewing axis (perpendicular to slice)
+- **z_phys Button**: For X/Y cross-sections, toggle terrain-following vertical geometry using the 3D `z_phys` field. The button is disabled for Z slices or when `z_phys` is unavailable.
 - **v/^ Buttons**: Navigate through layers with wrap-around
 - **Jump**: Quick jump to specific layer positions (First, 1/4, Middle, 3/4, Last) or type a layer number
 - **Profile**: Show mean, std, and skewness statistics along the current axis
