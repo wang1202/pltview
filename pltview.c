@@ -265,6 +265,9 @@ int render_offset_x = 0, render_offset_y = 0;
 int render_width = 0, render_height = 0;
 double render_phys_ymin = 0.0, render_phys_ymax = 1.0;
 int render_uses_z_phys = 0;
+int *map_hover_lookup = NULL;       /* Canvas pixel -> base-slice cell index */
+size_t map_hover_lookup_size = 0;
+int map_hover_lookup_active = 0;
 char hover_value_text[256] = "";
 
 /* Zoom and scroll state */
@@ -480,6 +483,8 @@ void draw_z_phys_cells(const double *z_values, const unsigned long *pixels,
                        double view_ymin, double view_ymax,
                        int offset_x, int offset_y, int draw_width, int draw_height);
 int canvas_to_data_indices(int mouse_x, int mouse_y, int *data_x, int *data_y);
+int prepare_map_hover_lookup(void);
+void record_map_hover_rect(int x, int y, int width, int height, int cell_idx);
 void update_layer_label(PlotfileData *pf);
 void canvas_expose_callback(Widget w, XtPointer client_data, XtPointer call_data);
 void canvas_motion_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_dispatch);
@@ -2282,10 +2287,63 @@ void draw_z_phys_cells(const double *z_values, const unsigned long *pixels,
     }
 }
 
+/* Build a fast inverse map from displayed map pixels back to scalar cells. */
+int prepare_map_hover_lookup(void) {
+    size_t needed = (size_t)canvas_width * canvas_height;
+    if (needed == 0) return -1;
+    if (needed > map_hover_lookup_size) {
+        int *new_lookup = (int *)realloc(map_hover_lookup, needed * sizeof(int));
+        if (!new_lookup) {
+            map_hover_lookup_active = 0;
+            return -1;
+        }
+        map_hover_lookup = new_lookup;
+        map_hover_lookup_size = needed;
+    }
+    for (size_t p = 0; p < needed; p++) map_hover_lookup[p] = -1;
+    map_hover_lookup_active = 1;
+    return 0;
+}
+
+/* Record the same clipped rectangle that represents a map cell on screen. */
+void record_map_hover_rect(int x, int y, int width, int height, int cell_idx) {
+    if (!map_hover_lookup_active || !map_hover_lookup || width <= 0 || height <= 0)
+        return;
+
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + width;
+    int y1 = y + height;
+    if (x0 < vis_area_x) x0 = vis_area_x;
+    if (y0 < vis_area_y) y0 = vis_area_y;
+    if (x1 > vis_area_x + vis_area_w) x1 = vis_area_x + vis_area_w;
+    if (y1 > vis_area_y + vis_area_h) y1 = vis_area_y + vis_area_h;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > canvas_width) x1 = canvas_width;
+    if (y1 > canvas_height) y1 = canvas_height;
+    if (x0 >= x1 || y0 >= y1) return;
+
+    for (int py = y0; py < y1; py++) {
+        int *row = map_hover_lookup + (size_t)py * canvas_width;
+        for (int px = x0; px < x1; px++) row[px] = cell_idx;
+    }
+}
+
 /* Convert a canvas location back to a slice cell, including terrain geometry. */
 int canvas_to_data_indices(int mouse_x, int mouse_y, int *data_x, int *data_y) {
     if (!data_x || !data_y || render_width <= 0 || render_height <= 0 ||
         slice_width <= 0 || slice_height <= 0) return 0;
+
+    if (map_hover_lookup_active && map_hover_lookup &&
+        mouse_x >= 0 && mouse_x < canvas_width && mouse_y >= 0 && mouse_y < canvas_height) {
+        int idx = map_hover_lookup[(size_t)mouse_y * canvas_width + mouse_x];
+        if (idx < 0 || idx >= slice_width * slice_height) return 0;
+        *data_x = idx % slice_width;
+        *data_y = idx / slice_width;
+        return 1;
+    }
+    if (global_pf && global_pf->map_mode) return 0;
 
     int ix = (int)((mouse_x - render_offset_x) * slice_width / (double)render_width);
     if (ix < 0 || ix >= slice_width) return 0;
@@ -4370,6 +4428,9 @@ void render_slice(PlotfileData *pf) {
     int i, j;
     char stats_text[128];
 
+    /* A map render rebuilds this lookup from projected cell positions below. */
+    map_hover_lookup_active = 0;
+
     /* Axis margin sizes */
     int left_margin = 60;    /* Space for Y-axis labels */
     int bottom_margin = 40;  /* Space for X-axis labels */
@@ -4793,10 +4854,15 @@ void render_slice(PlotfileData *pf) {
             if (dot_w < 1) dot_w = 1;
             if (dot_h < 1) dot_h = 1;
 
+            /* Hover hit-testing must use the projected cell positions, not the
+             * cell's relative i/j position in the rectangular frame. */
+            prepare_map_hover_lookup();
+
             /* Render each data point at its coordinate */
             for (j = 0; j < height; j++) {
                 for (i = 0; i < width; i++) {
                     int idx = j * width + i;
+                    if (base_in_box && !base_in_box[idx]) continue;
                     double x_coord = x_geo_extent[idx];
                     double y_coord = y_coord_extent[idx];
 
@@ -4808,6 +4874,7 @@ void render_slice(PlotfileData *pf) {
                         /* Draw a rectangle for each data point */
                         XSetForeground(display, gc, point_pixels[idx]);
                         XFillRectangle(display, canvas, gc, screen_x, screen_y, dot_w, dot_h);
+                        record_map_hover_rect(screen_x, screen_y, dot_w, dot_h, idx);
                     }
                 }
             }
@@ -5737,6 +5804,11 @@ void canvas_motion_handler(Widget w, XtPointer client_data, XEvent *event, Boole
 
         /* Update hover value text and info label */
         snprintf(hover_value_text, sizeof(hover_value_text), "[%d,%d]: %.6e", data_x, data_y, value);
+        update_info_label(global_pf);
+    } else if (hover_value_text[0] != '\0') {
+        /* In map mode, blank areas inside the rectangular frame may not
+         * correspond to any projected scalar cell. */
+        hover_value_text[0] = '\0';
         update_info_label(global_pf);
     }
 }
@@ -9679,6 +9751,10 @@ void cleanup(PlotfileData *pf) {
     pixel_data_size = 0;
     if (current_slice_data) free(current_slice_data);
     if (current_z_phys_slice) free(current_z_phys_slice);
+    free(map_hover_lookup);
+    map_hover_lookup = NULL;
+    map_hover_lookup_size = 0;
+    map_hover_lookup_active = 0;
 }
 
 /* ========== SDM Mode GUI and Rendering ========== */
